@@ -1,0 +1,1486 @@
+import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react'
+import { getSupabase } from '../lib/supabase'
+import {
+  dollarsStringToCents,
+  formatAccountDropdownLabel,
+  formatCurrencyFromCents,
+  formatEnvelopeDropdownLabel,
+} from '../lib/currency'
+import { addMonths, endOfMonth, format, max, min, startOfMonth, subDays, subMonths } from 'date-fns'
+import { CollapsibleCard } from '../components/ui/CollapsibleCard'
+import {
+  isBillPaidForMonth,
+  monthKeyFromDate,
+  normalizeBillPaidByMonth,
+  setEnvelopeBillPaidForMonth,
+} from '../lib/billPaidMonth'
+import { daysUntilNextDue, formatDueDayPhrase, nextDueDateOnOrAfter } from '../lib/envelopeDueDates'
+
+type EnvelopeType = 'expense' | 'savings' | 'debt'
+
+type EnvelopeGroup = {
+  id: string
+  name: string
+  sort_order: number
+  archived: boolean
+}
+
+type EnvelopeGoalType = 'assign_monthly' | 'refill_up_to'
+
+type Envelope = {
+  id: string
+  name: string
+  type: EnvelopeType
+  budget_target_cents: number
+  goal_type: EnvelopeGoalType | null
+  goal_target_cents: number | null
+  balance_cents: number
+  color: string
+  sort_order: number
+  archived: boolean
+  group_id: string | null
+  due_day_of_month: number | null
+  bill_paid_by_month: Record<string, boolean>
+  is_subscription: boolean
+  subscription_amount_cents: number | null
+  subscription_payee: string | null
+  subscription_note: string | null
+  subscription_account_id: string | null
+  subscription_autopay_enabled: boolean
+  subscription_last_paid_month: string | null
+}
+
+type FinancialAccount = {
+  id: string
+  name: string
+  account_type: 'checking' | 'savings' | 'credit_card' | 'debt' | 'cash' | 'other'
+  balance_cents: number
+}
+
+type EnvelopeMove = {
+  id: string
+  from_envelope_id: string
+  to_envelope_id: string
+  amount_cents: number
+  reason: string | null
+  created_at: string
+  from_envelope: { name: string } | null
+  to_envelope: { name: string } | null
+}
+
+type EnvelopeForm = {
+  name: string
+  type: EnvelopeType
+  goalType: EnvelopeGoalType
+  targetDollars: string
+  color: string
+  groupId: string
+  /** Empty = no due day; otherwise 1–31 */
+  dueDayOfMonth: string
+}
+
+type MoveForm = {
+  fromEnvelopeId: string
+  toEnvelopeId: string
+  amountDollars: string
+  reason: string
+}
+
+type SubscriptionForm = {
+  envelopeId: string
+  accountId: string
+  payee: string
+  amountDollars: string
+  note: string
+  autopayEnabled: boolean
+}
+
+type DatePreset = 'all_time' | 'this_month' | 'last_30' | 'last_90' | 'custom'
+
+const DEFAULT_GROUP_LABEL = 'Ungrouped'
+
+const DEFAULT_FORM: EnvelopeForm = {
+  name: '',
+  type: 'expense',
+  goalType: 'assign_monthly',
+  targetDollars: '',
+  color: '#10b981',
+  groupId: '',
+  dueDayOfMonth: '',
+}
+
+const DEFAULT_MOVE_FORM: MoveForm = {
+  fromEnvelopeId: '',
+  toEnvelopeId: '',
+  amountDollars: '',
+  reason: '',
+}
+
+const DEFAULT_SUBSCRIPTION_FORM: SubscriptionForm = {
+  envelopeId: '',
+  accountId: '',
+  payee: '',
+  amountDollars: '',
+  note: '',
+  autopayEnabled: true,
+}
+
+export function EnvelopesPage() {
+  const [groups, setGroups] = useState<EnvelopeGroup[]>([])
+  const [envelopes, setEnvelopes] = useState<Envelope[]>([])
+  const [moves, setMoves] = useState<EnvelopeMove[]>([])
+  const [accounts, setAccounts] = useState<FinancialAccount[]>([])
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+  const [newGroupName, setNewGroupName] = useState('')
+  const [groupRename, setGroupRename] = useState<Record<string, string>>({})
+  const [form, setForm] = useState<EnvelopeForm>(DEFAULT_FORM)
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [moveOpen, setMoveOpen] = useState(false)
+  const [moveForm, setMoveForm] = useState<MoveForm>(DEFAULT_MOVE_FORM)
+  const [subscriptionForm, setSubscriptionForm] = useState<SubscriptionForm>(DEFAULT_SUBSCRIPTION_FORM)
+  const [subscriptionEditingEnvelopeId, setSubscriptionEditingEnvelopeId] = useState<string | null>(null)
+  const [movesFromDate, setMovesFromDate] = useState('')
+  const [movesToDate, setMovesToDate] = useState('')
+  const [movesDatePreset, setMovesDatePreset] = useState<DatePreset>('all_time')
+  const [billPaidSavingId, setBillPaidSavingId] = useState<string | null>(null)
+  const [monthlyAssignedByEnvelope, setMonthlyAssignedByEnvelope] = useState<Record<string, number>>({})
+  const [assignmentMatrix, setAssignmentMatrix] = useState<Record<string, number>>({})
+  const [assignmentWindowStart, setAssignmentWindowStart] = useState(() =>
+    startOfMonth(subMonths(new Date(), 5)),
+  )
+  /** Month used for "assigned" progress bars under Active Envelopes. */
+  const [activeEnvelopesViewMonth, setActiveEnvelopesViewMonth] = useState(() => startOfMonth(new Date()))
+  const assignmentMonths = useMemo(
+    () =>
+      Array.from({ length: 6 }, (_, idx) =>
+        format(startOfMonth(addMonths(assignmentWindowStart, idx)), 'yyyy-MM'),
+      ),
+    [assignmentWindowStart],
+  )
+
+  const loadData = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const supabase = getSupabase()
+      const autoResp = await supabase.rpc('run_subscription_autopay', {
+        p_run_date: format(new Date(), 'yyyy-MM-dd'),
+      })
+      if (autoResp.error && !autoResp.error.message.toLowerCase().includes('run_subscription_autopay')) {
+        throw autoResp.error
+      }
+      const assignStart = startOfMonth(assignmentWindowStart)
+      const assignEnd = endOfMonth(addMonths(assignStart, 5))
+      const viewStart = startOfMonth(activeEnvelopesViewMonth)
+      const viewEnd = endOfMonth(activeEnvelopesViewMonth)
+      const spanStart = min([assignStart, viewStart])
+      const spanEnd = max([assignEnd, viewEnd])
+      const monthStart = format(startOfMonth(subMonths(spanStart, 1)), 'yyyy-MM-dd')
+      const monthEnd = format(endOfMonth(addMonths(spanEnd, 1)), 'yyyy-MM-dd')
+      const [groupsResp, envelopesResp, movesResp, monthAllocationsResp, accountsResp] = await Promise.all([
+        supabase.from('envelope_groups').select('id,name,sort_order,archived').order('sort_order', { ascending: true }),
+        supabase
+          .from('envelopes')
+          .select(
+            'id,name,type,budget_target_cents,goal_type,goal_target_cents,balance_cents,color,sort_order,archived,group_id,due_day_of_month,bill_paid_by_month,is_subscription,subscription_amount_cents,subscription_payee,subscription_note,subscription_account_id,subscription_autopay_enabled,subscription_last_paid_month',
+          )
+          .order('sort_order', { ascending: true }),
+        supabase
+          .from('envelope_moves')
+          .select(
+            'id,from_envelope_id,to_envelope_id,amount_cents,reason,created_at,from_envelope:from_envelope_id(name),to_envelope:to_envelope_id(name)',
+          )
+          .order('created_at', { ascending: false })
+          .limit(10),
+        supabase
+          .from('paycheck_allocations')
+          .select('envelope_id,amount_cents,allocation_month')
+          .gte('allocation_month', monthStart)
+          .lte('allocation_month', monthEnd),
+        supabase
+          .from('financial_accounts')
+          .select('id,name,account_type,balance_cents')
+          .eq('archived', false)
+          .in('account_type', ['checking', 'savings', 'cash', 'other'])
+          .order('name', { ascending: true }),
+      ])
+      if (groupsResp.error) throw groupsResp.error
+      if (envelopesResp.error) throw envelopesResp.error
+      if (movesResp.error) throw movesResp.error
+      if (monthAllocationsResp.error) throw monthAllocationsResp.error
+      if (accountsResp.error) throw accountsResp.error
+
+      setGroups(groupsResp.data ?? [])
+      setEnvelopes(
+        (envelopesResp.data ?? []).map((row) => ({
+          ...row,
+          bill_paid_by_month: normalizeBillPaidByMonth((row as Envelope).bill_paid_by_month),
+        })) as Envelope[],
+      )
+      setMoves((movesResp.data ?? []) as unknown as EnvelopeMove[])
+      setAccounts((accountsResp.data ?? []) as FinancialAccount[])
+      const byEnvelope: Record<string, number> = {}
+      const matrix: Record<string, number> = {}
+      const viewMonthKey = format(activeEnvelopesViewMonth, 'yyyy-MM')
+      for (const row of (monthAllocationsResp.data ?? []) as Array<{
+        envelope_id: string
+        amount_cents: number
+        allocation_month: string
+      }>) {
+        const month = row.allocation_month?.slice(0, 7)
+        if (!month) continue
+        const key = `${row.envelope_id}|${month}`
+        matrix[key] = (matrix[key] ?? 0) + row.amount_cents
+        if (month === viewMonthKey) {
+          byEnvelope[row.envelope_id] = (byEnvelope[row.envelope_id] ?? 0) + row.amount_cents
+        }
+      }
+      setMonthlyAssignedByEnvelope(byEnvelope)
+      setAssignmentMatrix(matrix)
+      setGroupRename(
+        Object.fromEntries((groupsResp.data ?? []).map((group) => [group.id, group.name])),
+      )
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load envelope data.')
+    } finally {
+      setLoading(false)
+    }
+  }, [assignmentWindowStart, activeEnvelopesViewMonth])
+
+  useEffect(() => {
+    void loadData()
+  }, [loadData])
+
+  useEffect(() => {
+    if (subscriptionEditingEnvelopeId) return
+    if (subscriptionForm.accountId) return
+    if (accounts.length === 0) return
+    setSubscriptionForm((prev) => ({ ...prev, accountId: accounts[0].id }))
+  }, [accounts, subscriptionEditingEnvelopeId, subscriptionForm.accountId])
+
+  const groupedEnvelopes = useMemo(() => {
+    const activeGroups = groups.filter((group) => !group.archived)
+    const activeEnvelopes = envelopes.filter((envelope) => !envelope.archived)
+    const byGroup = activeGroups.map((group) => ({
+      id: group.id,
+      label: group.name,
+      envelopes: activeEnvelopes.filter((envelope) => envelope.group_id === group.id),
+    }))
+    const ungrouped = activeEnvelopes.filter((envelope) => !envelope.group_id)
+    if (ungrouped.length > 0) {
+      byGroup.push({ id: 'ungrouped', label: DEFAULT_GROUP_LABEL, envelopes: ungrouped })
+    }
+    return byGroup
+  }, [groups, envelopes])
+
+  const activeEnvelopes = useMemo(
+    () =>
+      envelopes
+        .filter((envelope) => !envelope.archived)
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    [envelopes],
+  )
+
+  const subscriptionEnvelopes = useMemo(
+    () => activeEnvelopes.filter((e) => e.is_subscription).sort((a, b) => a.name.localeCompare(b.name)),
+    [activeEnvelopes],
+  )
+
+  const upcomingBills = useMemo(() => {
+    const withDue = activeEnvelopes.filter((e) => e.due_day_of_month != null && e.type !== 'debt')
+    const today = new Date()
+    return [...withDue].sort(
+      (a, b) =>
+        daysUntilNextDue(a.due_day_of_month!, today) - daysUntilNextDue(b.due_day_of_month!, today),
+    )
+  }, [activeEnvelopes])
+
+  const filteredMoves = useMemo(
+    () =>
+      moves.filter((move) => {
+        const moveDate = move.created_at.slice(0, 10)
+        if (movesFromDate && moveDate < movesFromDate) return false
+        if (movesToDate && moveDate > movesToDate) return false
+        return true
+      }),
+    [moves, movesFromDate, movesToDate],
+  )
+
+  function resetForm() {
+    setForm(DEFAULT_FORM)
+    setEditingId(null)
+  }
+
+  async function createGroup() {
+    const name = newGroupName.trim()
+    if (!name) return
+    setSaving(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const nextSort = groups.length === 0 ? 0 : Math.max(...groups.map((group) => group.sort_order)) + 1
+      const { error: insertError } = await getSupabase()
+        .from('envelope_groups')
+        .insert({ name, sort_order: nextSort })
+      if (insertError) throw insertError
+      setNewGroupName('')
+      setNotice('Group created.')
+      await loadData()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not create group.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function renameGroup(groupId: string) {
+    const name = (groupRename[groupId] ?? '').trim()
+    if (!name) return
+    setSaving(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const { error: updateError } = await getSupabase()
+        .from('envelope_groups')
+        .update({ name })
+        .eq('id', groupId)
+      if (updateError) throw updateError
+      setNotice('Group updated.')
+      await loadData()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not update group.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function archiveGroup(groupId: string) {
+    setSaving(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const { error: updateError } = await getSupabase()
+        .from('envelope_groups')
+        .update({ archived: true })
+        .eq('id', groupId)
+      if (updateError) throw updateError
+      setNotice('Group archived.')
+      await loadData()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not archive group.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  function beginEdit(envelope: Envelope) {
+    setEditingId(envelope.id)
+    const goalType: EnvelopeGoalType = envelope.goal_type === 'refill_up_to' ? 'refill_up_to' : 'assign_monthly'
+    const targetCents =
+      goalType === 'refill_up_to' ? (envelope.goal_target_cents ?? 0) : envelope.budget_target_cents
+    setForm({
+      name: envelope.name,
+      type: envelope.type,
+      goalType,
+      targetDollars: (targetCents / 100).toFixed(2),
+      color: envelope.color || '#10b981',
+      groupId: envelope.group_id ?? '',
+      dueDayOfMonth: envelope.due_day_of_month != null ? String(envelope.due_day_of_month) : '',
+    })
+    setNotice(null)
+    setError(null)
+  }
+
+  async function submitEnvelope(event: FormEvent) {
+    event.preventDefault()
+    const name = form.name.trim()
+    if (!name) {
+      setError('Envelope name is required.')
+      return
+    }
+
+    const targetCents = dollarsStringToCents(form.targetDollars)
+    if (targetCents == null || targetCents < 0) {
+      setError('Goal amount must be a valid non-negative amount.')
+      return
+    }
+    if (form.goalType === 'refill_up_to' && targetCents === 0) {
+      setError('Refill cap must be greater than zero, or switch goal type to assign monthly with $0.')
+      return
+    }
+
+    let dueDayOfMonth: number | null = null
+    const rawDue = form.dueDayOfMonth.trim()
+    if (rawDue.length > 0) {
+      const parsed = Number.parseInt(rawDue, 10)
+      if (Number.isNaN(parsed) || parsed < 1 || parsed > 31) {
+        setError('Due day must be empty or a whole number from 1 to 31.')
+        return
+      }
+      dueDayOfMonth = parsed
+    }
+
+    const balanceCents = editingId
+      ? (envelopes.find((envelope) => envelope.id === editingId)?.balance_cents ?? 0)
+      : 0
+
+    setSaving(true)
+    setError(null)
+    setNotice(null)
+
+    try {
+      const dueClear = dueDayOfMonth == null ? ({ bill_paid_by_month: {} } as const) : ({} as const)
+      const payload =
+        form.goalType === 'assign_monthly'
+          ? {
+              name,
+              type: form.type,
+              budget_target_cents: targetCents,
+              goal_type: 'assign_monthly' as const,
+              goal_target_cents: null as number | null,
+              balance_cents: balanceCents,
+              color: form.color || '#10b981',
+              group_id: form.groupId || null,
+              due_day_of_month: dueDayOfMonth,
+              ...dueClear,
+            }
+          : {
+              name,
+              type: form.type,
+              budget_target_cents: 0,
+              goal_type: 'refill_up_to' as const,
+              goal_target_cents: targetCents,
+              balance_cents: balanceCents,
+              color: form.color || '#10b981',
+              group_id: form.groupId || null,
+              due_day_of_month: dueDayOfMonth,
+              ...dueClear,
+            }
+
+      if (editingId) {
+        const { error: updateError } = await getSupabase().from('envelopes').update(payload).eq('id', editingId)
+        if (updateError) throw updateError
+        setNotice('Envelope updated.')
+      } else {
+        const nextSort = envelopes.length === 0 ? 0 : Math.max(...envelopes.map((envelope) => envelope.sort_order)) + 1
+        const { error: insertError } = await getSupabase().from('envelopes').insert({ ...payload, sort_order: nextSort })
+        if (insertError) throw insertError
+        setNotice('Envelope created.')
+      }
+
+      resetForm()
+      await loadData()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not save envelope.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function toggleBillPaidForEnvelope(envelope: Envelope, monthKey: string, paid: boolean) {
+    setBillPaidSavingId(envelope.id)
+    setError(null)
+    setNotice(null)
+    try {
+      await setEnvelopeBillPaidForMonth(envelope.id, envelope.bill_paid_by_month ?? {}, monthKey, paid)
+      setNotice(paid ? 'Marked paid for that bill month.' : 'Cleared paid mark.')
+      await loadData()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not update paid status.')
+    } finally {
+      setBillPaidSavingId(null)
+    }
+  }
+
+  async function archiveEnvelope(id: string) {
+    setSaving(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const { error: updateError } = await getSupabase().from('envelopes').update({ archived: true }).eq('id', id)
+      if (updateError) throw updateError
+      setNotice('Envelope archived.')
+      if (editingId === id) resetForm()
+      await loadData()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not archive envelope.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function submitMove(event: FormEvent) {
+    event.preventDefault()
+
+    const fromEnvelopeId = moveForm.fromEnvelopeId
+    const toEnvelopeId = moveForm.toEnvelopeId
+    const amountCents = dollarsStringToCents(moveForm.amountDollars)
+
+    if (!fromEnvelopeId || !toEnvelopeId) {
+      setError('Select both source and destination envelopes.')
+      return
+    }
+    if (fromEnvelopeId === toEnvelopeId) {
+      setError('Source and destination envelopes must be different.')
+      return
+    }
+    if (amountCents == null || amountCents <= 0) {
+      setError('Move amount must be a valid number greater than 0.')
+      return
+    }
+
+    const fromEnvelope = activeEnvelopes.find((envelope) => envelope.id === fromEnvelopeId)
+    if (!fromEnvelope) {
+      setError('The source envelope no longer exists.')
+      return
+    }
+    if (fromEnvelope.balance_cents < amountCents) {
+      setError('Insufficient funds in the source envelope.')
+      return
+    }
+
+    setSaving(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const { error: moveError } = await getSupabase().rpc('move_envelope_funds', {
+        p_from_envelope_id: fromEnvelopeId,
+        p_to_envelope_id: toEnvelopeId,
+        p_amount_cents: amountCents,
+        p_reason: moveForm.reason.trim() || null,
+      })
+      if (moveError) throw moveError
+
+      setMoveOpen(false)
+      setMoveForm(DEFAULT_MOVE_FORM)
+      setNotice('Funds moved successfully.')
+      await loadData()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not move funds.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  function beginSubscriptionEdit(envelope: Envelope) {
+    setSubscriptionEditingEnvelopeId(envelope.id)
+    setSubscriptionForm({
+      envelopeId: envelope.id,
+      accountId: envelope.subscription_account_id ?? accounts[0]?.id ?? '',
+      payee: envelope.subscription_payee ?? envelope.name,
+      amountDollars:
+        envelope.subscription_amount_cents != null
+          ? (envelope.subscription_amount_cents / 100).toFixed(2)
+          : (envelope.budget_target_cents / 100).toFixed(2),
+      note: envelope.subscription_note ?? '',
+      autopayEnabled: envelope.subscription_autopay_enabled,
+    })
+    setError(null)
+    setNotice(null)
+  }
+
+  async function submitSubscription(event: FormEvent) {
+    event.preventDefault()
+    const envelopeId = subscriptionForm.envelopeId
+    const accountId = subscriptionForm.accountId
+    const amountCents = dollarsStringToCents(subscriptionForm.amountDollars)
+    const payee = subscriptionForm.payee.trim()
+    if (!envelopeId) {
+      setError('Select an envelope to track as a subscription.')
+      return
+    }
+    if (!accountId) {
+      setError('Select the payment account.')
+      return
+    }
+    if (!payee) {
+      setError('Payee is required for the subscription.')
+      return
+    }
+    if (amountCents == null || amountCents <= 0) {
+      setError('Subscription amount must be greater than 0.')
+      return
+    }
+    const env = activeEnvelopes.find((e) => e.id === envelopeId)
+    if (!env) {
+      setError('That envelope no longer exists.')
+      return
+    }
+    if (env.due_day_of_month == null) {
+      setError('Set a due day on the envelope first so autopay knows when to post.')
+      return
+    }
+
+    setSaving(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const { error: updateError } = await getSupabase()
+        .from('envelopes')
+        .update({
+          is_subscription: true,
+          subscription_amount_cents: amountCents,
+          subscription_payee: payee,
+          subscription_note: subscriptionForm.note.trim() || null,
+          subscription_account_id: accountId,
+          subscription_autopay_enabled: subscriptionForm.autopayEnabled,
+        })
+        .eq('id', envelopeId)
+      if (updateError) throw updateError
+      setSubscriptionEditingEnvelopeId(null)
+      setSubscriptionForm({
+        ...DEFAULT_SUBSCRIPTION_FORM,
+        accountId: accounts[0]?.id ?? '',
+      })
+      setNotice('Subscription saved.')
+      await loadData()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not save subscription.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function removeSubscription(envelopeId: string) {
+    setSaving(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const { error: updateError } = await getSupabase()
+        .from('envelopes')
+        .update({
+          is_subscription: false,
+          subscription_amount_cents: null,
+          subscription_payee: null,
+          subscription_note: null,
+          subscription_account_id: null,
+          subscription_autopay_enabled: true,
+          subscription_last_paid_month: null,
+        })
+        .eq('id', envelopeId)
+      if (updateError) throw updateError
+      setNotice('Subscription removed.')
+      await loadData()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not remove subscription.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function runSubscriptionAutopayNow() {
+    setSaving(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const today = format(new Date(), 'yyyy-MM-dd')
+      const { data, error: rpcError } = await getSupabase().rpc('run_subscription_autopay', {
+        p_run_date: today,
+      })
+      if (rpcError) throw rpcError
+      const count = typeof data === 'number' ? data : 0
+      setNotice(count > 0 ? `Posted ${count} subscription payment${count === 1 ? '' : 's'}.` : 'No subscriptions were due today.')
+      await loadData()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not run subscription autopay.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  function applyMovesDatePreset(preset: DatePreset) {
+    const today = new Date()
+    setMovesDatePreset(preset)
+    if (preset === 'all_time') {
+      setMovesFromDate('')
+      setMovesToDate('')
+      return
+    }
+    if (preset === 'this_month') {
+      setMovesFromDate(format(startOfMonth(today), 'yyyy-MM-dd'))
+      setMovesToDate(format(today, 'yyyy-MM-dd'))
+      return
+    }
+    if (preset === 'last_30') {
+      setMovesFromDate(format(subDays(today, 29), 'yyyy-MM-dd'))
+      setMovesToDate(format(today, 'yyyy-MM-dd'))
+      return
+    }
+    if (preset === 'last_90') {
+      setMovesFromDate(format(subDays(today, 89), 'yyyy-MM-dd'))
+      setMovesToDate(format(today, 'yyyy-MM-dd'))
+      return
+    }
+  }
+
+  return (
+    <div className="space-y-6 sm:space-y-7 xl:space-y-8">
+      <section className="card-surface p-4 sm:p-6">
+        <h1 className="section-title">Envelopes</h1>
+        <p className="section-subtitle">
+          Manage category groups and monthly assignment targets. Balances change from paychecks, spending, and moves—
+          not from the envelope form. Set an optional due day (1–31) on bill-style categories so the dashboard can show
+          what is coming up.
+        </p>
+        {error && <p className="mt-3 rounded-lg bg-red-50 p-3 text-sm text-red-800 dark:bg-red-950/40 dark:text-red-100">{error}</p>}
+        {notice && <p className="mt-3 rounded-lg bg-emerald-50 p-3 text-sm text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-100">{notice}</p>}
+      </section>
+
+      <CollapsibleCard title="Assigned by Month" storageKey="envelopes-assigned-by-month">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-base font-semibold">Assigned by Month</h2>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setAssignmentWindowStart((prev) => startOfMonth(subMonths(prev, 1)))}
+              className="btn-secondary px-3 text-xs"
+            >
+              Previous
+            </button>
+            <button
+              type="button"
+              onClick={() => setAssignmentWindowStart((prev) => startOfMonth(addMonths(prev, 1)))}
+              className="btn-secondary px-3 text-xs"
+            >
+              Next
+            </button>
+          </div>
+        </div>
+        <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
+          Showing {format(new Date(`${assignmentMonths[0]}-01`), 'MMM yyyy')} through{' '}
+          {format(new Date(`${assignmentMonths[assignmentMonths.length - 1]}-01`), 'MMM yyyy')}.
+        </p>
+        {activeEnvelopes.length === 0 ? (
+          <p className="mt-3 text-sm text-zinc-500 dark:text-zinc-400">No envelopes yet.</p>
+        ) : (
+          <div className="mt-3 overflow-x-auto">
+            <table className="min-w-full border-separate border-spacing-y-1 text-sm">
+              <thead>
+                <tr className="text-left text-xs uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                  <th className="px-2 py-1">Envelope</th>
+                  {assignmentMonths.map((month) => (
+                    <th key={month} className="px-2 py-1">
+                      {format(new Date(`${month}-01`), 'MMM yyyy')}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {activeEnvelopes.map((envelope) => (
+                  <tr key={envelope.id} className="rounded-lg border border-zinc-200 dark:border-zinc-800">
+                    <td className="px-2 py-2 font-medium">{envelope.name}</td>
+                    {assignmentMonths.map((month) => {
+                      const cents = assignmentMatrix[`${envelope.id}|${month}`] ?? 0
+                      return (
+                        <td key={`${envelope.id}-${month}`} className="px-2 py-2">
+                          {cents > 0 ? formatCurrencyFromCents(cents) : '—'}
+                        </td>
+                      )
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </CollapsibleCard>
+
+      <CollapsibleCard title="Envelope Groups" storageKey="envelopes-groups">
+        <h2 className="text-base font-semibold">Envelope Groups</h2>
+        <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+          <input
+            type="text"
+            value={newGroupName}
+            onChange={(event) => setNewGroupName(event.target.value)}
+            placeholder="New group name (e.g. Bills)"
+            className="min-h-11 flex-1 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
+          />
+          <button
+            type="button"
+            onClick={() => void createGroup()}
+            disabled={saving}
+            className="btn-primary px-4 text-sm"
+          >
+            Add Group
+          </button>
+        </div>
+
+        <div className="mt-4 space-y-2">
+          {groups.filter((group) => !group.archived).map((group) => (
+            <div key={group.id} className="flex flex-col gap-2 rounded-xl border border-zinc-200 p-3.5 dark:border-zinc-800 sm:flex-row sm:items-center">
+              <input
+                type="text"
+                value={groupRename[group.id] ?? ''}
+                onChange={(event) => setGroupRename((prev) => ({ ...prev, [group.id]: event.target.value }))}
+                className="min-h-10 flex-1 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
+              />
+              <div className="flex gap-2">
+                <button type="button" onClick={() => void renameGroup(group.id)} className="btn-secondary px-3 text-xs">
+                  Rename
+                </button>
+                <button type="button" onClick={() => void archiveGroup(group.id)} className="btn-danger px-3 text-xs">
+                  Archive
+                </button>
+              </div>
+            </div>
+          ))}
+          {groups.filter((group) => !group.archived).length === 0 && (
+            <p className="text-sm text-zinc-500 dark:text-zinc-400">No active groups yet.</p>
+          )}
+        </div>
+      </CollapsibleCard>
+
+      <CollapsibleCard title={editingId ? 'Edit Envelope' : 'Add Envelope'} storageKey="envelopes-form">
+        <h2 className="text-base font-semibold">{editingId ? 'Edit Envelope' : 'Add Envelope'}</h2>
+        <form onSubmit={submitEnvelope} className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <label className="text-sm">
+            <span className="mb-1 block text-zinc-700 dark:text-zinc-300">Name</span>
+            <input
+              type="text"
+              value={form.name}
+              onChange={(event) => setForm((prev) => ({ ...prev, name: event.target.value }))}
+              required
+              className="min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
+            />
+          </label>
+          <label className="text-sm">
+            <span className="mb-1 block text-zinc-700 dark:text-zinc-300">Type</span>
+            <select
+              value={form.type}
+              onChange={(event) => setForm((prev) => ({ ...prev, type: event.target.value as EnvelopeType }))}
+              className="min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
+            >
+              <option value="expense">Expense</option>
+              <option value="savings">Savings</option>
+              <option value="debt">Debt</option>
+            </select>
+          </label>
+          <label className="text-sm sm:col-span-2">
+            <span className="mb-1 block text-zinc-700 dark:text-zinc-300">Goal type</span>
+            <select
+              value={form.goalType}
+              onChange={(event) =>
+                setForm((prev) => ({ ...prev, goalType: event.target.value as EnvelopeGoalType }))
+              }
+              className="min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
+            >
+              <option value="assign_monthly">Assign up to an amount each month</option>
+              <option value="refill_up_to">Refill balance up to a cap</option>
+            </select>
+          </label>
+          <label className="text-sm sm:col-span-2">
+            <span className="mb-1 block text-zinc-700 dark:text-zinc-300">
+              {form.goalType === 'assign_monthly' ? 'Monthly assignment target ($)' : 'Refill cap — target balance ($)'}
+            </span>
+            <input
+              type="text"
+              inputMode="decimal"
+              value={form.targetDollars}
+              onChange={(event) => setForm((prev) => ({ ...prev, targetDollars: event.target.value }))}
+              placeholder="0.00"
+              className="min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
+            />
+            <p className="mt-1 text-[11px] text-zinc-500 dark:text-zinc-400">
+              {form.goalType === 'assign_monthly'
+                ? 'One number for the month: progress compares paycheck allocations in the Journal to this amount. Use 0 for no monthly target.'
+                : 'One number for the cap: progress compares envelope balance to this ceiling. Use the Journal to add funds until you reach it.'}
+            </p>
+          </label>
+          <label className="text-sm">
+            <span className="mb-1 block text-zinc-700 dark:text-zinc-300">Color</span>
+            <input
+              type="color"
+              value={form.color}
+              onChange={(event) => setForm((prev) => ({ ...prev, color: event.target.value }))}
+              className="min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-2 py-2 dark:border-zinc-700 dark:bg-zinc-950"
+            />
+          </label>
+          <label className="text-sm">
+            <span className="mb-1 block text-zinc-700 dark:text-zinc-300">Group</span>
+            <select
+              value={form.groupId}
+              onChange={(event) => setForm((prev) => ({ ...prev, groupId: event.target.value }))}
+              className="min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
+            >
+              <option value="">Ungrouped</option>
+              {groups.filter((group) => !group.archived).map((group) => (
+                <option key={group.id} value={group.id}>
+                  {group.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="text-sm sm:col-span-2">
+            <span className="mb-1 block text-zinc-700 dark:text-zinc-300">Bill due day (optional)</span>
+            <input
+              type="text"
+              inputMode="numeric"
+              pattern="[0-9]*"
+              placeholder="e.g. 15 for bills due on the 15th"
+              value={form.dueDayOfMonth}
+              onChange={(event) => setForm((prev) => ({ ...prev, dueDayOfMonth: event.target.value.replace(/\D/g, '') }))}
+              className="min-h-11 w-full max-w-xs rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
+            />
+            <p className="mt-1 text-[11px] text-zinc-500 dark:text-zinc-400">
+              Leave blank if this category is not a dated bill. Day 29–31 clamp to the last day in shorter months. After
+              you pay, use Mark paid on the dashboard or under Upcoming bills — one flag per calendar month of that due
+              date (the May bill is keyed as that May).
+            </p>
+          </label>
+          <div className="sm:col-span-2 flex flex-wrap gap-2 pt-1">
+            <button
+              type="submit"
+              disabled={saving}
+              className="btn-primary px-4 text-sm"
+            >
+              {editingId ? 'Save Envelope' : 'Create Envelope'}
+            </button>
+            {editingId && (
+              <button type="button" onClick={resetForm} className="min-h-11 rounded-lg border border-zinc-300 px-4 text-sm font-medium dark:border-zinc-700">
+                Cancel Edit
+              </button>
+            )}
+          </div>
+        </form>
+      </CollapsibleCard>
+
+      <CollapsibleCard title="Upcoming bills" storageKey="envelopes-upcoming" defaultCollapsed={upcomingBills.length === 0}>
+        <p className="text-sm text-zinc-600 dark:text-zinc-400">
+          Envelopes with a due day set, sorted by how soon the next due date is from <strong>today</strong> (not the
+          month picker elsewhere on this page).
+        </p>
+        {upcomingBills.length === 0 ? (
+          <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">
+            No due days yet. Edit an envelope and add a bill due day (1–31), or all are debt-type (due days are hidden
+            for debt envelopes here).
+          </p>
+        ) : (
+          <ul className="mt-3 space-y-2 text-sm">
+            {upcomingBills.map((e) => {
+              const next = nextDueDateOnOrAfter(e.due_day_of_month!, new Date())
+              const days = daysUntilNextDue(e.due_day_of_month!, new Date())
+              const mk = monthKeyFromDate(next)
+              const paid = isBillPaidForMonth(e.bill_paid_by_month, mk)
+              const busy = billPaidSavingId === e.id
+              return (
+                <li
+                  key={e.id}
+                  className="flex flex-col gap-2 rounded-lg border border-zinc-200 px-3 py-2 dark:border-zinc-800 sm:flex-row sm:items-center sm:justify-between"
+                >
+                  <div className="min-w-0">
+                    <p className="font-medium text-zinc-900 dark:text-zinc-100">{e.name}</p>
+                    <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                      Next {format(next, 'MMM d, yyyy')} ({mk})
+                      {e.budget_target_cents > 0 ? ` · target ${formatCurrencyFromCents(e.budget_target_cents)}/mo` : ''}
+                    </p>
+                    {paid && (
+                      <p className="mt-1 text-xs font-medium text-emerald-700 dark:text-emerald-300">Paid for this due month</p>
+                    )}
+                  </div>
+                  <div className="flex shrink-0 flex-wrap items-center gap-2">
+                    <span className="text-xs font-medium text-emerald-800 dark:text-emerald-200">
+                      {days === 0 ? 'Due today' : days === 1 ? 'In 1 day' : `In ${days} days`}
+                    </span>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => void toggleBillPaidForEnvelope(e, mk, !paid)}
+                      className={[
+                        'min-h-9 rounded-lg border px-3 text-xs font-medium',
+                        paid
+                          ? 'border-zinc-300 text-zinc-700 dark:border-zinc-600 dark:text-zinc-200'
+                          : 'border-emerald-400 bg-emerald-50 text-emerald-900 dark:border-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-100',
+                      ].join(' ')}
+                    >
+                      {busy ? '…' : paid ? 'Unmark paid' : 'Mark paid'}
+                    </button>
+                  </div>
+                </li>
+              )
+            })}
+          </ul>
+        )}
+      </CollapsibleCard>
+
+      <CollapsibleCard
+        title="Subscription tracker"
+        storageKey="envelopes-subscriptions"
+        defaultCollapsed={subscriptionEnvelopes.length === 0}
+        actions={
+          <button
+            type="button"
+            onClick={() => void runSubscriptionAutopayNow()}
+            disabled={saving || subscriptionEnvelopes.length === 0}
+            className="btn-secondary px-3 text-xs"
+          >
+            Run autopay now
+          </button>
+        }
+      >
+        <p className="text-sm text-zinc-600 dark:text-zinc-400">
+          Track recurring subscriptions by linking an envelope to a payment account. On/after the due day, autopay posts
+          one payment per month (idempotent).
+        </p>
+        <form onSubmit={submitSubscription} className="mt-3 grid grid-cols-1 gap-3 rounded-lg border border-zinc-200 p-3 dark:border-zinc-800 sm:grid-cols-2">
+          <label className="text-sm">
+            <span className="mb-1 block text-zinc-700 dark:text-zinc-300">Envelope</span>
+            <select
+              value={subscriptionForm.envelopeId}
+              onChange={(event) => setSubscriptionForm((prev) => ({ ...prev, envelopeId: event.target.value }))}
+              className="min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
+            >
+              <option value="">Select envelope</option>
+              {activeEnvelopes.map((e) => (
+                <option key={e.id} value={e.id}>
+                  {formatEnvelopeDropdownLabel(e.name, e.balance_cents)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="text-sm">
+            <span className="mb-1 block text-zinc-700 dark:text-zinc-300">Payment account</span>
+            <select
+              value={subscriptionForm.accountId}
+              onChange={(event) => setSubscriptionForm((prev) => ({ ...prev, accountId: event.target.value }))}
+              className="min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
+            >
+              <option value="">Select account</option>
+              {accounts.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {formatAccountDropdownLabel(a.name, a.balance_cents)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="text-sm">
+            <span className="mb-1 block text-zinc-700 dark:text-zinc-300">Payee</span>
+            <input
+              type="text"
+              value={subscriptionForm.payee}
+              onChange={(event) => setSubscriptionForm((prev) => ({ ...prev, payee: event.target.value }))}
+              className="min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
+              placeholder="e.g. Netflix"
+            />
+          </label>
+          <label className="text-sm">
+            <span className="mb-1 block text-zinc-700 dark:text-zinc-300">Amount</span>
+            <input
+              type="text"
+              inputMode="decimal"
+              value={subscriptionForm.amountDollars}
+              onChange={(event) => setSubscriptionForm((prev) => ({ ...prev, amountDollars: event.target.value }))}
+              className="min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
+              placeholder="0.00"
+            />
+          </label>
+          <label className="text-sm sm:col-span-2">
+            <span className="mb-1 block text-zinc-700 dark:text-zinc-300">Note (optional)</span>
+            <input
+              type="text"
+              value={subscriptionForm.note}
+              onChange={(event) => setSubscriptionForm((prev) => ({ ...prev, note: event.target.value }))}
+              className="min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
+              placeholder="Optional memo on posted transaction"
+            />
+          </label>
+          <label className="flex min-h-11 items-center gap-2 text-sm sm:col-span-2">
+            <input
+              type="checkbox"
+              checked={subscriptionForm.autopayEnabled}
+              onChange={(event) => setSubscriptionForm((prev) => ({ ...prev, autopayEnabled: event.target.checked }))}
+              className="h-4 w-4 rounded border-zinc-300 text-emerald-600 focus:ring-emerald-500 dark:border-zinc-700 dark:bg-zinc-900"
+            />
+            <span>Auto-pay this subscription each month</span>
+          </label>
+          <div className="sm:col-span-2 flex flex-wrap gap-2">
+            <button type="submit" disabled={saving} className="btn-primary px-4 text-sm">
+              {subscriptionEditingEnvelopeId ? 'Save subscription' : 'Add subscription'}
+            </button>
+            {subscriptionEditingEnvelopeId && (
+              <button
+                type="button"
+                onClick={() => {
+                  setSubscriptionEditingEnvelopeId(null)
+                  setSubscriptionForm({ ...DEFAULT_SUBSCRIPTION_FORM, accountId: accounts[0]?.id ?? '' })
+                }}
+                className="btn-secondary px-4 text-sm"
+              >
+                Cancel
+              </button>
+            )}
+          </div>
+        </form>
+
+        {subscriptionEnvelopes.length === 0 ? (
+          <p className="mt-3 text-sm text-zinc-500 dark:text-zinc-400">No subscriptions configured yet.</p>
+        ) : (
+          <div className="mt-3 min-w-0 overflow-x-hidden rounded-lg border border-zinc-200 dark:border-zinc-800">
+            <table className="w-full table-fixed border-collapse text-sm">
+              <thead>
+                <tr className="border-b border-zinc-200 bg-gradient-to-r from-cyan-50 to-white text-left text-xs font-semibold uppercase tracking-wide text-cyan-900 dark:border-zinc-800 dark:from-cyan-950/40 dark:to-zinc-950 dark:text-cyan-100">
+                  <th className="w-[22%] p-2.5 align-top">Envelope</th>
+                  <th className="w-[16%] p-2.5 align-top">Amount</th>
+                  <th className="w-[14%] p-2.5 align-top">Due day</th>
+                  <th className="w-[20%] p-2.5 align-top">Account</th>
+                  <th className="w-[12%] p-2.5 align-top">Auto</th>
+                  <th className="w-[16%] p-2.5 align-top">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {subscriptionEnvelopes.map((e) => {
+                  const accountName = accounts.find((a) => a.id === e.subscription_account_id)?.name ?? '—'
+                  return (
+                    <tr key={e.id} className="border-b border-zinc-100 dark:border-zinc-800/80">
+                      <td className="min-w-0 p-2.5 align-top font-medium break-words">{e.name}</td>
+                      <td className="p-2.5 align-top whitespace-nowrap">
+                        {e.subscription_amount_cents != null ? formatCurrencyFromCents(e.subscription_amount_cents) : '—'}
+                      </td>
+                      <td className="p-2.5 align-top whitespace-nowrap">{e.due_day_of_month ?? '—'}</td>
+                      <td className="min-w-0 p-2.5 align-top break-words">{accountName}</td>
+                      <td className="p-2.5 align-top whitespace-nowrap">{e.subscription_autopay_enabled ? 'On' : 'Off'}</td>
+                      <td className="p-2.5 align-top">
+                        <div className="flex flex-wrap gap-2">
+                          <button type="button" onClick={() => beginSubscriptionEdit(e)} className="btn-secondary px-3 text-xs">
+                            Edit
+                          </button>
+                          <button type="button" onClick={() => void removeSubscription(e.id)} className="btn-danger px-3 text-xs">
+                            Remove
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </CollapsibleCard>
+
+      <CollapsibleCard
+        title="Active Envelopes"
+        storageKey="envelopes-active"
+        actions={
+          <button
+            type="button"
+            onClick={() => {
+              setError(null)
+              setNotice(null)
+              setMoveOpen(true)
+            }}
+            disabled={activeEnvelopes.length < 2}
+            className="min-h-10 rounded-lg border border-emerald-300 px-3 text-xs font-medium text-emerald-700 transition hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-emerald-700 dark:text-emerald-300 dark:hover:bg-emerald-950/40"
+          >
+            Move Money
+          </button>
+        }
+      >
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h2 className="text-base font-semibold">Active Envelopes</h2>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setActiveEnvelopesViewMonth((prev) => startOfMonth(subMonths(prev, 1)))}
+              className="btn-secondary px-3 text-xs"
+            >
+              Previous month
+            </button>
+            <span className="min-w-[8.5rem] text-center text-sm font-medium text-zinc-800 dark:text-zinc-100">
+              {format(activeEnvelopesViewMonth, 'MMMM yyyy')}
+            </span>
+            <button
+              type="button"
+              onClick={() => setActiveEnvelopesViewMonth((prev) => startOfMonth(addMonths(prev, 1)))}
+              className="btn-secondary px-3 text-xs"
+            >
+              Next month
+            </button>
+          </div>
+        </div>
+        <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+          Monthly assignment progress uses paycheck allocations recorded in the month shown (balances stay live).
+        </p>
+        {loading ? (
+          <p className="mt-3 text-sm text-zinc-500 dark:text-zinc-400">Loading envelopes...</p>
+        ) : groupedEnvelopes.length === 0 ? (
+          <p className="mt-3 text-sm text-zinc-500 dark:text-zinc-400">No active envelopes yet. Add your first one above.</p>
+        ) : (
+          <div className="mt-4 space-y-4">
+            {groupedEnvelopes.map((group) => (
+              <div key={group.id}>
+                <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">{group.label}</h3>
+                <div className="space-y-2">
+                  {group.envelopes.map((envelope) => (
+                    <div key={envelope.id} className="flex flex-col gap-2 rounded-xl border border-zinc-200 p-3.5 dark:border-zinc-800 sm:flex-row sm:items-center">
+                      <div className="flex min-w-0 flex-1 items-center gap-3">
+                        <span className="h-3 w-3 rounded-full" style={{ backgroundColor: envelope.color }} />
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-medium">{envelope.name}</p>
+                          <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                            {envelope.type.toUpperCase()}
+                            {envelope.goal_type === 'refill_up_to' && (envelope.goal_target_cents ?? 0) > 0
+                              ? ` • Refill up to ${formatCurrencyFromCents(envelope.goal_target_cents ?? 0)}`
+                              : envelope.budget_target_cents > 0
+                                ? ` • Assign monthly ${formatCurrencyFromCents(envelope.budget_target_cents)}`
+                                : ''}
+                            {envelope.due_day_of_month != null
+                              ? ` • ${formatDueDayPhrase(envelope.due_day_of_month)}`
+                              : ''}
+                            {envelope.due_day_of_month != null
+                              ? (() => {
+                                  const next = nextDueDateOnOrAfter(envelope.due_day_of_month, new Date())
+                                  const mk = monthKeyFromDate(next)
+                                  return isBillPaidForMonth(envelope.bill_paid_by_month, mk)
+                                    ? ' • Next bill: paid'
+                                    : ' • Next bill: not marked paid'
+                                })()
+                              : ''}
+                          </p>
+                          {envelope.goal_type === 'refill_up_to' && (envelope.goal_target_cents ?? 0) > 0 ? (
+                            <EnvelopeRefillProgress
+                              balanceCents={envelope.balance_cents}
+                              capCents={envelope.goal_target_cents ?? 0}
+                            />
+                          ) : (
+                            envelope.budget_target_cents > 0 && (
+                              <EnvelopeMonthlyTargetProgress
+                                budgetTargetCents={envelope.budget_target_cents}
+                                assignedThisMonthCents={monthlyAssignedByEnvelope[envelope.id] ?? 0}
+                                assignedMonthLabel={format(activeEnvelopesViewMonth, 'MMMM yyyy')}
+                              />
+                            )
+                          )}
+                        </div>
+                      </div>
+                      <div className="text-sm font-semibold">{formatCurrencyFromCents(envelope.balance_cents)}</div>
+                      <div className="flex gap-2">
+                        <button type="button" onClick={() => beginEdit(envelope)} className="btn-secondary px-3 text-xs">
+                          Edit
+                        </button>
+                        <button type="button" onClick={() => void archiveEnvelope(envelope.id)} className="btn-danger px-3 text-xs">
+                          Archive
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </CollapsibleCard>
+
+      <CollapsibleCard title="Recent Moves" storageKey="envelopes-recent-moves">
+        <h2 className="text-base font-semibold">Recent Moves</h2>
+        <div className="mt-3 flex gap-2 overflow-x-auto pb-1 [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
+          {(
+            [
+              ['all_time', 'All time'],
+              ['this_month', 'This month'],
+              ['last_30', 'Last 30'],
+              ['last_90', 'Last 90'],
+              ['custom', 'Custom'],
+            ] as Array<[DatePreset, string]>
+          ).map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              onClick={() => applyMovesDatePreset(value)}
+              className={[
+                'min-h-10 rounded-lg border px-3 text-xs font-medium',
+                movesDatePreset === value
+                  ? 'border-emerald-400 bg-emerald-50 text-emerald-800 dark:border-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-200'
+                  : 'border-zinc-300 text-zinc-700 dark:border-zinc-700 dark:text-zinc-300',
+              ].join(' ')}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:max-w-xl">
+          <input
+            type="date"
+            value={movesFromDate}
+            onChange={(event) => {
+              setMovesDatePreset('custom')
+              setMovesFromDate(event.target.value)
+            }}
+            className="min-h-11 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
+          />
+          <input
+            type="date"
+            value={movesToDate}
+            onChange={(event) => {
+              setMovesDatePreset('custom')
+              setMovesToDate(event.target.value)
+            }}
+            className="min-h-11 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
+          />
+        </div>
+        {loading ? (
+          <p className="mt-3 text-sm text-zinc-500 dark:text-zinc-400">Loading recent moves...</p>
+        ) : filteredMoves.length === 0 ? (
+          <p className="mt-3 text-sm text-zinc-500 dark:text-zinc-400">No money moves recorded yet.</p>
+        ) : (
+          <div className="mt-4 space-y-2">
+            {filteredMoves.map((move) => (
+              <div
+                key={move.id}
+                className="flex flex-col gap-1 rounded-xl border border-zinc-200 p-3.5 dark:border-zinc-800 sm:flex-row sm:items-center sm:justify-between"
+              >
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-medium">
+                    {move.from_envelope?.name ?? 'Unknown'} {'->'} {move.to_envelope?.name ?? 'Unknown'}
+                  </p>
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                    {format(new Date(move.created_at), 'MMM d, yyyy h:mm a')}
+                    {move.reason ? ` • ${move.reason}` : ''}
+                  </p>
+                </div>
+                <p className="text-sm font-semibold text-emerald-700 dark:text-emerald-300">
+                  {formatCurrencyFromCents(move.amount_cents)}
+                </p>
+              </div>
+            ))}
+          </div>
+        )}
+      </CollapsibleCard>
+
+      {moveOpen && (
+        <div className="fixed inset-0 z-50 flex items-end bg-zinc-950/45 p-3 sm:items-center sm:justify-center">
+          <div className="w-full max-w-lg rounded-2xl border border-zinc-200 bg-white p-4 shadow-xl dark:border-zinc-800 dark:bg-zinc-900 sm:p-6">
+            <div className="mb-4 flex items-center justify-between gap-3">
+              <h3 className="text-base font-semibold">Move Money Between Envelopes</h3>
+              <button
+                type="button"
+                onClick={() => setMoveOpen(false)}
+                className="min-h-10 rounded-lg px-3 text-xs font-medium text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+              >
+                Close
+              </button>
+            </div>
+
+            <form onSubmit={submitMove} className="space-y-3">
+              <label className="text-sm">
+                <span className="mb-1 block text-zinc-700 dark:text-zinc-300">From Envelope</span>
+                <select
+                  value={moveForm.fromEnvelopeId}
+                  onChange={(event) => setMoveForm((prev) => ({ ...prev, fromEnvelopeId: event.target.value }))}
+                  className="min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
+                >
+                  <option value="">Select source envelope</option>
+                  {activeEnvelopes.map((envelope) => (
+                    <option key={envelope.id} value={envelope.id}>
+                      {formatEnvelopeDropdownLabel(envelope.name, envelope.balance_cents)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="text-sm">
+                <span className="mb-1 block text-zinc-700 dark:text-zinc-300">To Envelope</span>
+                <select
+                  value={moveForm.toEnvelopeId}
+                  onChange={(event) => setMoveForm((prev) => ({ ...prev, toEnvelopeId: event.target.value }))}
+                  className="min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
+                >
+                  <option value="">Select destination envelope</option>
+                  {activeEnvelopes.map((envelope) => (
+                    <option key={envelope.id} value={envelope.id} disabled={envelope.id === moveForm.fromEnvelopeId}>
+                      {formatEnvelopeDropdownLabel(envelope.name, envelope.balance_cents)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="text-sm">
+                <span className="mb-1 block text-zinc-700 dark:text-zinc-300">Amount ($)</span>
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  value={moveForm.amountDollars}
+                  onChange={(event) => setMoveForm((prev) => ({ ...prev, amountDollars: event.target.value }))}
+                  placeholder="0.00"
+                  className="min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
+                />
+              </label>
+
+              <label className="text-sm">
+                <span className="mb-1 block text-zinc-700 dark:text-zinc-300">Reason (optional)</span>
+                <input
+                  type="text"
+                  value={moveForm.reason}
+                  onChange={(event) => setMoveForm((prev) => ({ ...prev, reason: event.target.value }))}
+                  placeholder="e.g. Rebalanced groceries and dining"
+                  className="min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
+                />
+              </label>
+
+              <div className="flex flex-wrap gap-2 pt-1">
+                <button
+                  type="submit"
+                  disabled={saving}
+                  className="min-h-11 rounded-lg bg-emerald-600 px-4 text-sm font-medium text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {saving ? 'Moving...' : 'Move Funds'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMoveOpen(false)}
+                  className="min-h-11 rounded-lg border border-zinc-300 px-4 text-sm font-medium dark:border-zinc-700"
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function EnvelopeMonthlyTargetProgress({
+  budgetTargetCents,
+  assignedThisMonthCents,
+  assignedMonthLabel,
+}: {
+  budgetTargetCents: number
+  assignedThisMonthCents: number
+  assignedMonthLabel: string
+}) {
+  const target = budgetTargetCents
+  const current = Math.min(assignedThisMonthCents, target)
+  const need = Math.max(target - current, 0)
+  const caption = `Assigned in ${assignedMonthLabel}: ${formatCurrencyFromCents(current)} / ${formatCurrencyFromCents(target)} (${formatCurrencyFromCents(need)} to go)`
+  const percent = Math.max(0, Math.min(100, Math.round((current / target) * 100)))
+
+  return (
+    <div className="mt-1.5">
+      <p className="text-[11px] text-zinc-500 dark:text-zinc-400">{caption}</p>
+      <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700">
+        <div className="h-full rounded-full bg-emerald-500" style={{ width: `${percent}%` }} />
+      </div>
+    </div>
+  )
+}
+
+function EnvelopeRefillProgress({ balanceCents, capCents }: { balanceCents: number; capCents: number }) {
+  const target = capCents
+  const filled = Math.min(Math.max(balanceCents, 0), target)
+  const headroom = Math.max(target - balanceCents, 0)
+  const caption = `Balance ${formatCurrencyFromCents(balanceCents)} / cap ${formatCurrencyFromCents(target)} (${formatCurrencyFromCents(headroom)} headroom)`
+  const percent = target > 0 ? Math.max(0, Math.min(100, Math.round((filled / target) * 100))) : 0
+
+  return (
+    <div className="mt-1.5">
+      <p className="text-[11px] text-zinc-500 dark:text-zinc-400">{caption}</p>
+      <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700">
+        <div className="h-full rounded-full bg-sky-500" style={{ width: `${percent}%` }} />
+      </div>
+    </div>
+  )
+}

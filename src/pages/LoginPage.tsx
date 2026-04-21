@@ -5,6 +5,31 @@ import { getSupabase } from '../lib/supabase'
 import { isSupabaseConfigured } from '../lib/env'
 import { useAuthStore } from '../stores/authStore'
 
+const MFA_TRUST_DAYS = 30
+
+function mfaTrustKey(userId: string): string {
+  return `budgetjump:mfa_trusted_until:${userId}`
+}
+
+function getMfaTrustedUntil(userId: string): number {
+  try {
+    const raw = window.localStorage.getItem(mfaTrustKey(userId))
+    if (!raw) return 0
+    const n = Number(raw)
+    return Number.isFinite(n) ? n : 0
+  } catch {
+    return 0
+  }
+}
+
+function setMfaTrustedUntil(userId: string, trustedUntilMs: number): void {
+  try {
+    window.localStorage.setItem(mfaTrustKey(userId), String(trustedUntilMs))
+  } catch {
+    // ignore storage errors; MFA will simply be required again next sign-in
+  }
+}
+
 export function LoginPage() {
   const navigate = useNavigate()
   const location = useLocation()
@@ -21,8 +46,9 @@ export function LoginPage() {
   const [mfaFactorId, setMfaFactorId] = useState<string | null>(null)
   const [mfaChallengeId, setMfaChallengeId] = useState<string | null>(null)
   const [mfaCode, setMfaCode] = useState('')
+  const [mfaUserId, setMfaUserId] = useState<string | null>(null)
 
-  if (initialized && session) {
+  if (initialized && session && !submitting && !mfaChallengeId) {
     return <Navigate to={from} replace />
   }
 
@@ -47,20 +73,22 @@ export function LoginPage() {
         setError(signError.message)
         return
       }
-      const aalResp = await supabase.auth.mfa.getAuthenticatorAssuranceLevel()
-      if (aalResp.error) throw aalResp.error
-      if (aalResp.data.nextLevel === 'aal2' && aalResp.data.currentLevel !== 'aal2') {
-        const factorsResp = await supabase.auth.mfa.listFactors()
-        if (factorsResp.error) throw factorsResp.error
-        const factor = factorsResp.data.totp.find((f) => f.status === 'verified')
-        if (!factor) {
-          setError('MFA is required but no verified authenticator factor was found for this account.')
+      const userResp = await supabase.auth.getUser()
+      if (userResp.error) throw userResp.error
+      const userId = userResp.data.user?.id ?? null
+      const factorsResp = await supabase.auth.mfa.listFactors()
+      if (factorsResp.error) throw factorsResp.error
+      const factor = factorsResp.data.totp.find((f) => f.status === 'verified')
+      if (factor) {
+        if (userId && Date.now() < getMfaTrustedUntil(userId)) {
+          navigate(from, { replace: true })
           return
         }
         const challengeResp = await supabase.auth.mfa.challenge({ factorId: factor.id })
         if (challengeResp.error) throw challengeResp.error
         setMfaFactorId(factor.id)
         setMfaChallengeId(challengeResp.data.id)
+        setMfaUserId(userId)
         setNotice('Enter the 6-digit code from your authenticator app to finish signing in.')
         return
       }
@@ -87,6 +115,10 @@ export function LoginPage() {
       if (verifyError) {
         setError(verifyError.message)
         return
+      }
+      if (mfaUserId) {
+        const trustedUntil = Date.now() + MFA_TRUST_DAYS * 24 * 60 * 60 * 1000
+        setMfaTrustedUntil(mfaUserId, trustedUntil)
       }
       navigate(from, { replace: true })
     } catch (err) {

@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState, memo } from 'react'
 import { format } from 'date-fns'
 import { CollapsibleCard } from '../components/ui/CollapsibleCard'
 import {
@@ -34,6 +34,7 @@ type PaycheckSummary = {
   source: string
   net_amount_cents: number
   deposit_account_id: string | null
+  source_id: string | null
 }
 
 type PaycheckDetail = {
@@ -43,6 +44,8 @@ type PaycheckDetail = {
   net_amount_cents: number
   notes: string | null
   deposit_account_id: string | null
+  source_id: string | null
+  paycheck_sources?: { name: string; expected_amount_cents: number } | { name: string; expected_amount_cents: number }[] | null
 }
 
 type DepositAccount = {
@@ -50,6 +53,14 @@ type DepositAccount = {
   name: string
   balance_cents: number
   account_type: string
+}
+
+type PaycheckSource = {
+  id: string
+  name: string
+  expected_amount_cents: number
+  sort_order: number
+  archived: boolean
 }
 
 type AllocationLine = {
@@ -67,7 +78,79 @@ function newAllocationLineId(): string {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`
 }
 
+function unwrapPaycheckSourceRelation(
+  rel: PaycheckDetail['paycheck_sources'],
+): { name: string; expected_amount_cents: number } | null {
+  if (!rel) return null
+  return Array.isArray(rel) ? (rel[0] ?? null) : rel
+}
+
 type DatePreset = 'this_month' | 'last_30' | 'last_90' | 'all_time' | 'custom'
+
+const PaycheckSourceRowEditor = memo(function PaycheckSourceRowEditor(props: {
+  row: PaycheckSource
+  busy: boolean
+  onUpdate: (row: PaycheckSource, name: string, expectedDollars: string) => void | Promise<void>
+  onArchive: (id: string) => void | Promise<void>
+}) {
+  const [name, setName] = useState(props.row.name)
+  const [expectedDollars, setExpectedDollars] = useState((props.row.expected_amount_cents / 100).toFixed(2))
+  useEffect(() => {
+    setName(props.row.name)
+    setExpectedDollars((props.row.expected_amount_cents / 100).toFixed(2))
+  }, [props.row.id, props.row.name, props.row.expected_amount_cents])
+  return (
+    <div
+      className={[
+        'flex flex-col gap-2 rounded-lg border p-3 sm:flex-row sm:flex-wrap sm:items-end',
+        props.row.archived ? 'border-zinc-300 opacity-60 dark:border-zinc-700' : 'border-zinc-200 dark:border-zinc-800',
+      ].join(' ')}
+    >
+      <label className="min-w-0 flex-1 text-xs text-zinc-500 dark:text-zinc-400">
+        <span className="mb-1 block text-zinc-600 dark:text-zinc-300">Name</span>
+        <input
+          type="text"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          disabled={props.row.archived || props.busy}
+          className="min-h-10 w-full rounded-lg border border-zinc-300 bg-white px-2.5 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
+        />
+      </label>
+      <label className="w-full text-xs text-zinc-500 dark:text-zinc-400 sm:w-36">
+        <span className="mb-1 block text-zinc-600 dark:text-zinc-300">Expected / check ($)</span>
+        <input
+          type="text"
+          inputMode="decimal"
+          value={expectedDollars}
+          onChange={(e) => setExpectedDollars(e.target.value)}
+          disabled={props.row.archived || props.busy}
+          className="min-h-10 w-full rounded-lg border border-zinc-300 bg-white px-2.5 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
+        />
+      </label>
+      <div className="flex flex-wrap gap-2">
+        <button
+          type="button"
+          disabled={props.row.archived || props.busy}
+          onClick={() => void props.onUpdate(props.row, name, expectedDollars)}
+          className="min-h-10 rounded-lg bg-emerald-600 px-3 text-xs font-medium text-white shadow-sm hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          Save
+        </button>
+        <button
+          type="button"
+          disabled={props.row.archived || props.busy}
+          onClick={() => void props.onArchive(props.row.id)}
+          className="btn-danger min-h-10 px-3 text-xs disabled:opacity-40"
+        >
+          Archive
+        </button>
+      </div>
+      {props.row.archived && (
+        <p className="w-full text-[11px] text-zinc-500 dark:text-zinc-400">Archived — hidden from new paychecks.</p>
+      )}
+    </div>
+  )
+})
 
 export function JournalPage() {
   const [envelopes, setEnvelopes] = useState<Envelope[]>([])
@@ -84,6 +167,12 @@ export function JournalPage() {
   const [allocations, setAllocations] = useState<AllocationLine[]>([])
   const [depositAccounts, setDepositAccounts] = useState<DepositAccount[]>([])
   const [depositAccountId, setDepositAccountId] = useState('')
+  const [paycheckSources, setPaycheckSources] = useState<PaycheckSource[]>([])
+  const [sourceMode, setSourceMode] = useState<'saved' | 'other'>('other')
+  const [selectedSourceId, setSelectedSourceId] = useState('')
+  const [newSourceName, setNewSourceName] = useState('')
+  const [newSourceExpectedDollars, setNewSourceExpectedDollars] = useState('')
+  const [sourceMutationBusy, setSourceMutationBusy] = useState(false)
   const [editingPaycheckId, setEditingPaycheckId] = useState<string | null>(null)
 
   const [selectedPaycheckId, setSelectedPaycheckId] = useState<string | null>(null)
@@ -142,12 +231,18 @@ export function JournalPage() {
     editingPaycheckIdRef.current = editingPaycheckId
   }, [editingPaycheckId])
 
+  useEffect(() => {
+    if (sourceMode !== 'saved' || !selectedSourceId) return
+    const row = paycheckSources.find((item) => item.id === selectedSourceId)
+    if (row) setSource(row.name)
+  }, [sourceMode, selectedSourceId, paycheckSources])
+
   const loadData = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
       const supabase = getSupabase()
-      const [envelopesResp, historyResp, assignmentsResp, accountsResp] = await Promise.all([
+      const [envelopesResp, historyResp, assignmentsResp, accountsResp, sourcesResp] = await Promise.all([
         supabase
           .from('envelopes')
           .select('id,name,balance_cents,budget_target_cents,goal_type,goal_target_cents')
@@ -155,7 +250,7 @@ export function JournalPage() {
           .order('name', { ascending: true }),
         supabase
           .from('paychecks')
-          .select('id,date,source,net_amount_cents,deposit_account_id')
+          .select('id,date,source,net_amount_cents,deposit_account_id,source_id')
           .order('date', { ascending: false })
           .order('created_at', { ascending: false }),
         supabase.from('paycheck_allocations').select('envelope_id,allocation_month,amount_cents'),
@@ -165,11 +260,17 @@ export function JournalPage() {
           .eq('archived', false)
           .order('sort_order', { ascending: true })
           .order('name', { ascending: true }),
+        supabase
+          .from('paycheck_sources')
+          .select('id,name,expected_amount_cents,sort_order,archived')
+          .order('sort_order', { ascending: true })
+          .order('name', { ascending: true }),
       ])
       if (envelopesResp.error) throw envelopesResp.error
       if (historyResp.error) throw historyResp.error
       if (assignmentsResp.error) throw assignmentsResp.error
       if (accountsResp.error) throw accountsResp.error
+      if (sourcesResp.error) throw sourcesResp.error
       const loadedEnvelopes = (envelopesResp.data ?? []) as Envelope[]
       const depositCandidates = ((accountsResp.data ?? []) as DepositAccount[]).filter(
         (account) => account.account_type !== 'credit_card' && account.account_type !== 'debt',
@@ -177,6 +278,7 @@ export function JournalPage() {
       setEnvelopes(loadedEnvelopes)
       setDepositAccounts(depositCandidates)
       setHistory((historyResp.data ?? []) as PaycheckSummary[])
+      setPaycheckSources((sourcesResp.data ?? []) as PaycheckSource[])
       setDepositAccountId((prev) => {
         if (prev && depositCandidates.some((account) => account.id === prev)) return prev
         return depositCandidates[0]?.id ?? ''
@@ -224,6 +326,18 @@ export function JournalPage() {
   }, [loadData])
 
   const netCents = dollarsStringToCents(netDollars) ?? 0
+  const selectableSourceRows = useMemo(
+    () =>
+      paycheckSources.filter(
+        (row) => !row.archived || (Boolean(selectedSourceId) && row.id === selectedSourceId),
+      ),
+    [paycheckSources, selectedSourceId],
+  )
+  const expectedBaselineCents = useMemo(() => {
+    if (sourceMode !== 'saved' || !selectedSourceId) return null
+    const row = paycheckSources.find((item) => item.id === selectedSourceId)
+    return row ? row.expected_amount_cents : null
+  }, [sourceMode, selectedSourceId, paycheckSources])
   const allocationSumCents = useMemo(
     () =>
       allocations.reduce((sum, row) => {
@@ -233,12 +347,112 @@ export function JournalPage() {
     [allocations],
   )
   const remainderCents = netCents - allocationSumCents
+  const sourceOk =
+    sourceMode === 'other'
+      ? source.trim().length > 0
+      : Boolean(selectedSourceId) && Boolean(paycheckSources.some((item) => item.id === selectedSourceId))
   const canSave =
-    source.trim().length > 0 &&
+    sourceOk &&
     netCents > 0 &&
     remainderCents === 0 &&
     Boolean(depositAccountId) &&
     depositAccounts.length > 0
+
+  async function addPaycheckSource() {
+    setError(null)
+    setNotice(null)
+    const name = newSourceName.trim()
+    const cents = dollarsStringToCents(newSourceExpectedDollars)
+    if (!name) {
+      setError('Source name is required.')
+      return
+    }
+    if (cents === null || cents < 0) {
+      setError('Expected amount must be zero or a positive dollar value.')
+      return
+    }
+    setSourceMutationBusy(true)
+    try {
+      const supabase = getSupabase()
+      const insertResp = await supabase
+        .from('paycheck_sources')
+        .insert({
+          name,
+          expected_amount_cents: cents,
+          sort_order: 0,
+          archived: false,
+        })
+        .select('id,name,expected_amount_cents,sort_order,archived')
+        .single()
+      if (insertResp.error) throw insertResp.error
+      setNewSourceName('')
+      setNewSourceExpectedDollars('')
+      setNotice('Paycheck source saved.')
+      await loadData()
+      const created = insertResp.data as PaycheckSource
+      setSourceMode('saved')
+      setSelectedSourceId(created.id)
+      setSource(created.name)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not save paycheck source.')
+    } finally {
+      setSourceMutationBusy(false)
+    }
+  }
+
+  async function updatePaycheckSource(row: PaycheckSource, name: string, expectedDollars: string) {
+    setError(null)
+    setNotice(null)
+    const trimmed = name.trim()
+    const cents = dollarsStringToCents(expectedDollars)
+    if (!trimmed) {
+      setError('Source name is required.')
+      return
+    }
+    if (cents === null || cents < 0) {
+      setError('Expected amount must be zero or a positive dollar value.')
+      return
+    }
+    setSourceMutationBusy(true)
+    try {
+      const supabase = getSupabase()
+      const updateResp = await supabase
+        .from('paycheck_sources')
+        .update({ name: trimmed, expected_amount_cents: cents })
+        .eq('id', row.id)
+      if (updateResp.error) throw updateResp.error
+      if (selectedSourceId === row.id) {
+        setSource(trimmed)
+      }
+      setNotice('Paycheck source updated.')
+      await loadData()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not update paycheck source.')
+    } finally {
+      setSourceMutationBusy(false)
+    }
+  }
+
+  async function archivePaycheckSource(id: string) {
+    setError(null)
+    setNotice(null)
+    setSourceMutationBusy(true)
+    try {
+      const supabase = getSupabase()
+      const updateResp = await supabase.from('paycheck_sources').update({ archived: true }).eq('id', id)
+      if (updateResp.error) throw updateResp.error
+      if (selectedSourceId === id) {
+        setSelectedSourceId('')
+        setSourceMode('other')
+      }
+      setNotice('Source archived. Existing paychecks keep their labels; pick a new source for future entries.')
+      await loadData()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not archive paycheck source.')
+    } finally {
+      setSourceMutationBusy(false)
+    }
+  }
 
   async function savePaycheck(event: FormEvent) {
     event.preventDefault()
@@ -267,6 +481,7 @@ export function JournalPage() {
 
     setSaving(true)
     try {
+      const pSourceId = sourceMode === 'saved' && selectedSourceId ? selectedSourceId : null
       const result = editingPaycheckId
         ? await getSupabase().rpc('update_paycheck_journal_entry', {
             p_paycheck_id: editingPaycheckId,
@@ -276,6 +491,7 @@ export function JournalPage() {
             p_notes: notes.trim() || null,
             p_allocations: allocationPayload,
             p_deposit_account_id: depositAccountId,
+            p_source_id: pSourceId,
           })
         : await getSupabase().rpc('save_paycheck_journal_entry', {
             p_date: date,
@@ -285,6 +501,7 @@ export function JournalPage() {
             p_allocations: allocationPayload,
             p_deposit_account_id: depositAccountId,
             p_moves: [],
+            p_source_id: pSourceId,
           })
       if (result.error) throw result.error
 
@@ -293,6 +510,8 @@ export function JournalPage() {
       editingPaycheckIdRef.current = null
       setEditingPaycheckId(null)
       setEditingOriginalAssigned({})
+      setSourceMode('other')
+      setSelectedSourceId('')
       setSource('')
       setNetDollars('')
       setNotes('')
@@ -317,7 +536,9 @@ export function JournalPage() {
       const [detailResp, allocationsResp] = await Promise.all([
         supabase
           .from('paychecks')
-          .select('id,date,source,net_amount_cents,notes,deposit_account_id')
+          .select(
+            'id,date,source,net_amount_cents,notes,deposit_account_id,source_id,paycheck_sources:source_id(name,expected_amount_cents)',
+          )
           .eq('id', paycheckId)
           .single(),
         supabase
@@ -349,7 +570,7 @@ export function JournalPage() {
     const [detailResp, allocationsResp] = await Promise.all([
       supabase
         .from('paychecks')
-        .select('id,date,source,net_amount_cents,notes,deposit_account_id')
+        .select('id,date,source,net_amount_cents,notes,deposit_account_id,source_id')
         .eq('id', paycheckId)
         .single(),
       supabase
@@ -374,6 +595,7 @@ export function JournalPage() {
       net_amount_cents: number
       notes: string | null
       deposit_account_id: string | null
+      source_id: string | null
     }
     const rows = (allocationsResp.data ?? []) as Array<{
       envelope_id: string
@@ -387,6 +609,13 @@ export function JournalPage() {
     }
     setEditingOriginalAssigned(baseline)
     setDate(detail.date)
+    if (detail.source_id) {
+      setSourceMode('saved')
+      setSelectedSourceId(detail.source_id)
+    } else {
+      setSourceMode('other')
+      setSelectedSourceId('')
+    }
     setSource(detail.source)
     setNetDollars((detail.net_amount_cents / 100).toFixed(2))
     setNotes(detail.notes ?? '')
@@ -688,6 +917,62 @@ export function JournalPage() {
         )}
       </section>
 
+      <CollapsibleCard title="Saved paycheck sources" storageKey="journal-paycheck-sources">
+        <h2 className="text-base font-semibold">Saved paycheck sources</h2>
+        <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+          Each source stores the label you see in history and the net amount you usually expect per paycheck. When you
+          log a paycheck you can pick one of these or use a one-time label instead.
+        </p>
+        <div className="mt-4 flex flex-col gap-3 rounded-xl border border-zinc-200 p-3.5 dark:border-zinc-800 sm:flex-row sm:flex-wrap sm:items-end">
+          <label className="min-w-0 flex-1 text-xs text-zinc-500 dark:text-zinc-400">
+            <span className="mb-1 block text-zinc-600 dark:text-zinc-300">New source name</span>
+            <input
+              type="text"
+              value={newSourceName}
+              onChange={(e) => setNewSourceName(e.target.value)}
+              placeholder="e.g. Acme Corp"
+              disabled={sourceMutationBusy}
+              className="min-h-10 w-full rounded-lg border border-zinc-300 bg-white px-2.5 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
+            />
+          </label>
+          <label className="w-full text-xs text-zinc-500 dark:text-zinc-400 sm:w-40">
+            <span className="mb-1 block text-zinc-600 dark:text-zinc-300">Expected net ($)</span>
+            <input
+              type="text"
+              inputMode="decimal"
+              value={newSourceExpectedDollars}
+              onChange={(e) => setNewSourceExpectedDollars(e.target.value)}
+              placeholder="0.00"
+              disabled={sourceMutationBusy}
+              className="min-h-10 w-full rounded-lg border border-zinc-300 bg-white px-2.5 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
+            />
+          </label>
+          <button
+            type="button"
+            disabled={sourceMutationBusy}
+            onClick={() => void addPaycheckSource()}
+            className="min-h-10 rounded-lg bg-emerald-600 px-4 text-sm font-medium text-white shadow-sm hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {sourceMutationBusy ? 'Saving…' : 'Add source'}
+          </button>
+        </div>
+        <div className="mt-4 space-y-2">
+          {paycheckSources.length === 0 ? (
+            <p className="text-sm text-zinc-500 dark:text-zinc-400">No saved sources yet.</p>
+          ) : (
+            paycheckSources.map((row) => (
+              <PaycheckSourceRowEditor
+                key={row.id}
+                row={row}
+                busy={sourceMutationBusy}
+                onUpdate={(r, name, dollars) => void updatePaycheckSource(r, name, dollars)}
+                onArchive={(id) => void archivePaycheckSource(id)}
+              />
+            ))
+          )}
+        </div>
+      </CollapsibleCard>
+
       <CollapsibleCard title="Log Paycheck" storageKey="journal-log-paycheck">
         <h2 className="text-base font-semibold">Log Paycheck</h2>
         {editingPaycheckId && (
@@ -707,17 +992,73 @@ export function JournalPage() {
                 className="min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
               />
             </label>
-            <label className="text-sm sm:col-span-2">
-              <span className="mb-1 block text-zinc-700 dark:text-zinc-300">Source / Payer</span>
-              <input
-                type="text"
-                value={source}
-                onChange={(e) => setSource(e.target.value)}
-                placeholder="e.g. Employer Payroll"
-                required
-                className="min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
-              />
-            </label>
+            <div className="text-sm sm:col-span-2 xl:col-span-3">
+              <span className="mb-1 block text-zinc-700 dark:text-zinc-300">Source</span>
+              <div className="flex flex-wrap gap-4 text-sm">
+                <label className="inline-flex cursor-pointer items-center gap-2 text-zinc-700 dark:text-zinc-200">
+                  <input
+                    type="radio"
+                    name="journal-paycheck-source-mode"
+                    checked={sourceMode === 'saved'}
+                    onChange={() => setSourceMode('saved')}
+                    className="h-4 w-4 border-zinc-300 text-emerald-600 focus:ring-emerald-500 dark:border-zinc-600"
+                  />
+                  Saved source
+                </label>
+                <label className="inline-flex cursor-pointer items-center gap-2 text-zinc-700 dark:text-zinc-200">
+                  <input
+                    type="radio"
+                    name="journal-paycheck-source-mode"
+                    checked={sourceMode === 'other'}
+                    onChange={() => {
+                      setSourceMode('other')
+                      setSelectedSourceId('')
+                    }}
+                    className="h-4 w-4 border-zinc-300 text-emerald-600 focus:ring-emerald-500 dark:border-zinc-600"
+                  />
+                  One-time / other
+                </label>
+              </div>
+              {sourceMode === 'saved' ? (
+                <div className="mt-2 space-y-2">
+                  {selectableSourceRows.length === 0 ? (
+                    <p className="text-xs text-amber-700 dark:text-amber-300">
+                      Add at least one saved source above, or choose &quot;One-time / other&quot;.
+                    </p>
+                  ) : (
+                    <select
+                      value={selectedSourceId}
+                      onChange={(e) => setSelectedSourceId(e.target.value)}
+                      required={sourceMode === 'saved'}
+                      className="min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
+                    >
+                      <option value="">Select a source…</option>
+                      {selectableSourceRows.map((row) => (
+                        <option key={row.id} value={row.id}>
+                          {row.name}
+                          {row.archived ? ' (archived)' : ''} — exp. {formatCurrencyFromCents(row.expected_amount_cents)}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                  {expectedBaselineCents !== null && (
+                    <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                      Expected net for this source: {formatCurrencyFromCents(expectedBaselineCents)}. Enter the actual
+                      net above; while allocating you will see how much is extra vs that baseline.
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <input
+                  type="text"
+                  value={source}
+                  onChange={(e) => setSource(e.target.value)}
+                  placeholder="e.g. Side gig, bonus, gift"
+                  required={sourceMode === 'other'}
+                  className="mt-2 min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
+                />
+              )}
+            </div>
             <label className="text-sm">
               <span className="mb-1 block text-zinc-700 dark:text-zinc-300">Net ($)</span>
               <input
@@ -773,6 +1114,31 @@ export function JournalPage() {
               different months from one paycheck (for example $400 to April and $100 to May). Opening-balance deposits
               start with no lines filled—add amounts until the remainder is $0.00.
             </p>
+            {expectedBaselineCents !== null && netCents > 0 && (
+              <p className="mt-2 text-sm text-zinc-700 dark:text-zinc-200">
+                Compared to saved source: expected {formatCurrencyFromCents(expectedBaselineCents)}, this entry net is{' '}
+                {formatCurrencyFromCents(netCents)}.
+                {netCents >= expectedBaselineCents ? (
+                  <>
+                    {' '}
+                    Extra above expected:{' '}
+                    <span className="font-semibold text-emerald-700 dark:text-emerald-300">
+                      {formatCurrencyFromCents(netCents - expectedBaselineCents)}
+                    </span>
+                    .
+                  </>
+                ) : (
+                  <>
+                    {' '}
+                    Below expected by:{' '}
+                    <span className="font-semibold text-amber-700 dark:text-amber-300">
+                      {formatCurrencyFromCents(expectedBaselineCents - netCents)}
+                    </span>
+                    .
+                  </>
+                )}
+              </p>
+            )}
             <div className="mt-3 space-y-2">
               {allocations.map((row, idx) => {
                 const envelope = envelopes.find((item) => item.id === row.envelopeId)
@@ -928,6 +1294,8 @@ export function JournalPage() {
                   editingPaycheckIdRef.current = null
                   setEditingPaycheckId(null)
                   setEditingOriginalAssigned({})
+                  setSourceMode('other')
+                  setSelectedSourceId('')
                   setSource('')
                   setNetDollars('')
                   setNotes('')
@@ -1002,6 +1370,27 @@ export function JournalPage() {
               Paycheck — {selectedDetail.source} — {format(new Date(selectedDetail.date), 'MMMM d, yyyy')} — Net:{' '}
               {formatCurrencyFromCents(selectedDetail.net_amount_cents)}
             </p>
+            {(() => {
+              const linked = unwrapPaycheckSourceRelation(selectedDetail.paycheck_sources)
+              if (!linked) return null
+              const delta = selectedDetail.net_amount_cents - linked.expected_amount_cents
+              return (
+                <p className="text-zinc-600 dark:text-zinc-300">
+                  Linked source expected {formatCurrencyFromCents(linked.expected_amount_cents)}.
+                  {delta >= 0 ? (
+                    <>
+                      {' '}
+                      Extra above expected: {formatCurrencyFromCents(delta)}.
+                    </>
+                  ) : (
+                    <>
+                      {' '}
+                      Below expected by: {formatCurrencyFromCents(-delta)}.
+                    </>
+                  )}
+                </p>
+              )
+            })()}
             <p className="text-zinc-600 dark:text-zinc-300">
               Deposited to:{' '}
               {selectedDetail.deposit_account_id

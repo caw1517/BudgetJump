@@ -294,25 +294,7 @@ export function JournalPage() {
       }
       setAssignedByEnvelopeMonth(assignedMap)
       if (!editingPaycheckIdRef.current) {
-        if (loadedEnvelopes.length === 0) {
-          setAllocations([
-            {
-              lineId: newAllocationLineId(),
-              envelopeId: '',
-              amountDollars: '',
-              allocationMonth: currentMonthForNewRows,
-            },
-          ])
-        } else {
-          setAllocations(
-            loadedEnvelopes.map((envelope) => ({
-              lineId: newAllocationLineId(),
-              envelopeId: envelope.id,
-              amountDollars: '',
-              allocationMonth: currentMonthForNewRows,
-            })),
-          )
-        }
+        setAllocations([])
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load paycheck journal data.')
@@ -624,18 +606,8 @@ export function JournalPage() {
         ? detail.deposit_account_id
         : depositAccounts[0]?.id ?? '',
     )
-    const monthDefault = detail.date.slice(0, 7)
     if (rows.length === 0) {
-      setAllocations(
-        envelopes.length === 0
-          ? [{ lineId: newAllocationLineId(), envelopeId: '', amountDollars: '', allocationMonth: monthDefault }]
-          : envelopes.map((e) => ({
-              lineId: newAllocationLineId(),
-              envelopeId: e.id,
-              amountDollars: '',
-              allocationMonth: monthDefault,
-            })),
-      )
+      setAllocations([])
     } else {
       setAllocations(
         rows.map((r) => ({
@@ -1110,9 +1082,10 @@ export function JournalPage() {
           <div className="rounded-xl border border-zinc-200 p-3.5 dark:border-zinc-800">
             <h3 className="text-sm font-semibold">Allocations</h3>
             <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-              Allocate the full net amount across envelopes. Use multiple lines for the same category to fund
-              different months from one paycheck (for example $400 to April and $100 to May). Opening-balance deposits
-              start with no lines filled—add amounts until the remainder is $0.00.
+              Allocate the full net amount across envelopes. New entries start with no lines—use &quot;Add allocation
+              line&quot; for each envelope (and amount) you want to fund. Use multiple lines for the same category to
+              fund different months from one paycheck (for example $400 to April and $100 to May). Keep adding until
+              the remainder is $0.00.
             </p>
             {expectedBaselineCents !== null && netCents > 0 && (
               <p className="mt-2 text-sm text-zinc-700 dark:text-zinc-200">
@@ -1204,11 +1177,8 @@ export function JournalPage() {
                     <div className="flex items-end pb-0.5">
                       <button
                         type="button"
-                        disabled={allocations.length <= 1}
-                        onClick={() =>
-                          setAllocations((prev) => (prev.length <= 1 ? prev : prev.filter((_, i) => i !== idx)))
-                        }
-                        className="btn-danger px-2.5 text-xs disabled:opacity-40"
+                        onClick={() => setAllocations((prev) => prev.filter((_, i) => i !== idx))}
+                        className="btn-danger px-2.5 text-xs"
                       >
                         Remove
                       </button>
@@ -1252,7 +1222,7 @@ export function JournalPage() {
                   ...prev,
                   {
                     lineId: newAllocationLineId(),
-                    envelopeId: prev[0]?.envelopeId || envelopes[0]?.id || '',
+                    envelopeId: '',
                     amountDollars: '',
                     allocationMonth: defaultAllocationMonth,
                   },

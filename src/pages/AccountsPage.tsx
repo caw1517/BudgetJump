@@ -96,6 +96,7 @@ export function AccountsPage() {
   const [nameDrafts, setNameDrafts] = useState<Record<string, string>>({})
   const [minimumDrafts, setMinimumDrafts] = useState<Record<string, string>>({})
   const [plannedDrafts, setPlannedDrafts] = useState<Record<string, string>>({})
+  const [balanceDrafts, setBalanceDrafts] = useState<Record<string, string>>({})
   const [registerSearch, setRegisterSearch] = useState('')
   const [registerFromDate, setRegisterFromDate] = useState('')
   const [registerToDate, setRegisterToDate] = useState('')
@@ -170,6 +171,9 @@ export function AccountsPage() {
             a.planned_monthly_payment_cents != null ? (a.planned_monthly_payment_cents / 100).toFixed(2) : '',
           ]),
         ),
+      )
+      setBalanceDrafts(
+        Object.fromEntries(loadedAccounts.map((a) => [a.id, (a.balance_cents / 100).toFixed(2)])),
       )
       setEnvelopes((envelopesResp.data ?? []) as EnvelopeOption[])
       setTransactions((txResp.data ?? []) as AccountTransaction[])
@@ -422,6 +426,12 @@ export function AccountsPage() {
     }
 
     const isLiability = account.account_type === 'credit_card' || account.account_type === 'debt'
+    const balanceDraft = balanceDrafts[accountId] ?? (account.balance_cents / 100).toFixed(2)
+    const balanceCents = dollarsStringToCents(balanceDraft.trim())
+    if (balanceCents == null) {
+      setError('Balance must be a valid amount.')
+      return
+    }
 
     let aprBps: number | null = null
     let minimumPaymentCents: number | null = null
@@ -475,6 +485,7 @@ export function AccountsPage() {
             apr_bps: aprDraft.trim() ? aprBps : null,
             minimum_payment_cents: minimumPaymentCents,
             planned_monthly_payment_cents: plannedMonthlyCents,
+            balance_cents: balanceCents,
           })
           .eq('id', accountId)
         if (updateError) throw updateError
@@ -485,7 +496,10 @@ export function AccountsPage() {
         })
         if (syncErr) throw syncErr
       } else {
-        const { error: updateError } = await supabase.from('financial_accounts').update({ name }).eq('id', accountId)
+        const { error: updateError } = await supabase
+          .from('financial_accounts')
+          .update({ name, balance_cents: balanceCents })
+          .eq('id', accountId)
         if (updateError) throw updateError
       }
 
@@ -778,6 +792,21 @@ export function AccountsPage() {
                     }
                     className="min-h-10 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
                   />
+                  <div>
+                    <label className="text-[11px] text-zinc-500 dark:text-zinc-400">Account balance ($)</label>
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      value={balanceDrafts[account.id] ?? (account.balance_cents / 100).toFixed(2)}
+                      onChange={(event) =>
+                        setBalanceDrafts((prev) => ({
+                          ...prev,
+                          [account.id]: event.target.value,
+                        }))
+                      }
+                      className="mt-1 min-h-10 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
+                    />
+                  </div>
                   {(account.account_type === 'credit_card' || account.account_type === 'debt') && (
                     <div className="space-y-2">
                       <div>

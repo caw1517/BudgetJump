@@ -142,6 +142,10 @@ export function EnvelopesPage() {
   const [moveForm, setMoveForm] = useState<MoveForm>(DEFAULT_MOVE_FORM)
   const [subscriptionForm, setSubscriptionForm] = useState<SubscriptionForm>(DEFAULT_SUBSCRIPTION_FORM)
   const [subscriptionEditingEnvelopeId, setSubscriptionEditingEnvelopeId] = useState<string | null>(null)
+  const [draggingGroupId, setDraggingGroupId] = useState<string | null>(null)
+  const [draggingEnvelopeId, setDraggingEnvelopeId] = useState<string | null>(null)
+  const [dragOverGroupId, setDragOverGroupId] = useState<string | null>(null)
+  const [dragOverEnvelopeId, setDragOverEnvelopeId] = useState<string | null>(null)
   const [movesFromDate, setMovesFromDate] = useState('')
   const [movesToDate, setMovesToDate] = useState('')
   const [movesDatePreset, setMovesDatePreset] = useState<DatePreset>('all_time')
@@ -280,7 +284,7 @@ export function EnvelopesPage() {
     () =>
       envelopes
         .filter((envelope) => !envelope.archived)
-        .sort((a, b) => a.name.localeCompare(b.name)),
+        .sort((a, b) => (a.sort_order === b.sort_order ? a.name.localeCompare(b.name) : a.sort_order - b.sort_order)),
     [envelopes],
   )
 
@@ -308,6 +312,104 @@ export function EnvelopesPage() {
       }),
     [moves, movesFromDate, movesToDate],
   )
+
+  async function persistActiveGroupOrder(groupIds: string[]) {
+    for (const [idx, id] of groupIds.entries()) {
+      const { error: updateError } = await getSupabase()
+        .from('envelope_groups')
+        .update({ sort_order: idx })
+        .eq('id', id)
+      if (updateError) throw updateError
+    }
+  }
+
+  async function persistActiveEnvelopeOrder(order: string[], draggedEnvelopeNewGroupId?: string | null) {
+    const draggedId = draggingEnvelopeId
+    for (const [idx, id] of order.entries()) {
+      const update: { sort_order: number; group_id?: string | null } = { sort_order: idx }
+      if (draggedId && id === draggedId && draggedEnvelopeNewGroupId !== undefined) {
+        update.group_id = draggedEnvelopeNewGroupId
+      }
+      const { error: updateError } = await getSupabase().from('envelopes').update(update).eq('id', id)
+      if (updateError) throw updateError
+    }
+  }
+
+  async function dropGroupOnGroup(targetGroupId: string) {
+    if (!draggingGroupId || draggingGroupId === targetGroupId) return
+    setSaving(true)
+    setError(null)
+    try {
+      const ids = groups.filter((g) => !g.archived).map((g) => g.id)
+      const from = ids.indexOf(draggingGroupId)
+      const to = ids.indexOf(targetGroupId)
+      if (from < 0 || to < 0) return
+      const next = [...ids]
+      const [moved] = next.splice(from, 1)
+      next.splice(to, 0, moved)
+      await persistActiveGroupOrder(next)
+      await loadData()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not reorder groups.')
+    } finally {
+      setSaving(false)
+      setDraggingGroupId(null)
+      setDragOverGroupId(null)
+    }
+  }
+
+  async function dropEnvelopeOnEnvelope(targetEnvelopeId: string, targetGroupId: string | null) {
+    if (!draggingEnvelopeId || draggingEnvelopeId === targetEnvelopeId) return
+    setSaving(true)
+    setError(null)
+    try {
+      const ids = activeEnvelopes.map((e) => e.id)
+      const from = ids.indexOf(draggingEnvelopeId)
+      const to = ids.indexOf(targetEnvelopeId)
+      if (from < 0 || to < 0) return
+      const next = [...ids]
+      const [moved] = next.splice(from, 1)
+      next.splice(to, 0, moved)
+      await persistActiveEnvelopeOrder(next, targetGroupId)
+      await loadData()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not reorder envelopes.')
+    } finally {
+      setSaving(false)
+      setDraggingEnvelopeId(null)
+      setDragOverEnvelopeId(null)
+      setDragOverGroupId(null)
+    }
+  }
+
+  async function dropEnvelopeOnGroup(targetGroupId: string | null) {
+    if (!draggingEnvelopeId) return
+    setSaving(true)
+    setError(null)
+    try {
+      const ids = activeEnvelopes.map((e) => e.id).filter((id) => id !== draggingEnvelopeId)
+      const byId = Object.fromEntries(activeEnvelopes.map((e) => [e.id, e]))
+      let insertAt = ids.length
+      for (let i = ids.length - 1; i >= 0; i -= 1) {
+        const envelope = byId[ids[i]]
+        const gid = envelope?.group_id ?? null
+        if (gid === targetGroupId) {
+          insertAt = i + 1
+          break
+        }
+      }
+      ids.splice(insertAt, 0, draggingEnvelopeId)
+      await persistActiveEnvelopeOrder(ids, targetGroupId)
+      await loadData()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not move envelope to this group.')
+    } finally {
+      setSaving(false)
+      setDraggingEnvelopeId(null)
+      setDragOverEnvelopeId(null)
+      setDragOverGroupId(null)
+    }
+  }
 
   function resetForm() {
     setForm(DEFAULT_FORM)
@@ -810,7 +912,34 @@ export function EnvelopesPage() {
 
         <div className="mt-4 space-y-2">
           {groups.filter((group) => !group.archived).map((group) => (
-            <div key={group.id} className="flex flex-col gap-2 rounded-xl border border-zinc-200 p-3.5 dark:border-zinc-800 sm:flex-row sm:items-center">
+            <div
+              key={group.id}
+              draggable
+              onDragStart={() => setDraggingGroupId(group.id)}
+              onDragEnd={() => {
+                setDraggingGroupId(null)
+                setDragOverGroupId(null)
+              }}
+              onDragOver={(event) => {
+                event.preventDefault()
+                if (draggingGroupId) setDragOverGroupId(group.id)
+              }}
+              onDragLeave={() => {
+                if (dragOverGroupId === group.id) setDragOverGroupId(null)
+              }}
+              onDrop={(event) => {
+                event.preventDefault()
+                void dropGroupOnGroup(group.id)
+              }}
+              className={[
+                'flex cursor-grab flex-col gap-2 rounded-xl border p-3.5 transition-all active:cursor-grabbing dark:border-zinc-800 sm:flex-row sm:items-center',
+                draggingGroupId === group.id
+                  ? 'border-emerald-400 bg-emerald-50/80 opacity-75 shadow-sm dark:border-emerald-700 dark:bg-emerald-950/30'
+                  : dragOverGroupId === group.id
+                    ? 'border-sky-400 bg-sky-50/70 ring-2 ring-sky-300/70 dark:border-sky-700 dark:bg-sky-950/30 dark:ring-sky-800/60'
+                    : 'border-zinc-200',
+              ].join(' ')}
+            >
               <input
                 type="text"
                 value={groupRename[group.id] ?? ''}
@@ -1210,11 +1339,63 @@ export function EnvelopesPage() {
         ) : (
           <div className="mt-4 space-y-4">
             {groupedEnvelopes.map((group) => (
-              <div key={group.id}>
+              <div
+                key={group.id}
+                onDragOver={(event) => {
+                  event.preventDefault()
+                  if (draggingEnvelopeId) setDragOverGroupId(group.id)
+                }}
+                onDragLeave={() => {
+                  if (dragOverGroupId === group.id) setDragOverGroupId(null)
+                }}
+                onDrop={(event) => {
+                  event.preventDefault()
+                  const targetGroupId = group.id === 'ungrouped' ? null : group.id
+                  void dropEnvelopeOnGroup(targetGroupId)
+                }}
+                className={[
+                  'rounded-xl transition-all',
+                  dragOverGroupId === group.id && draggingEnvelopeId
+                    ? 'bg-sky-50/60 ring-2 ring-dashed ring-sky-300/80 dark:bg-sky-950/20 dark:ring-sky-800/70'
+                    : '',
+                ].join(' ')}
+              >
                 <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">{group.label}</h3>
                 <div className="space-y-2">
                   {group.envelopes.map((envelope) => (
-                    <div key={envelope.id} className="flex flex-col gap-2 rounded-xl border border-zinc-200 p-3.5 dark:border-zinc-800 sm:flex-row sm:items-center">
+                    <div
+                      key={envelope.id}
+                      draggable
+                      onDragStart={() => setDraggingEnvelopeId(envelope.id)}
+                      onDragEnd={() => {
+                        setDraggingEnvelopeId(null)
+                        setDragOverEnvelopeId(null)
+                        setDragOverGroupId(null)
+                      }}
+                      onDragOver={(event) => {
+                        event.preventDefault()
+                        if (draggingEnvelopeId) {
+                          setDragOverEnvelopeId(envelope.id)
+                          setDragOverGroupId(group.id)
+                        }
+                      }}
+                      onDragLeave={() => {
+                        if (dragOverEnvelopeId === envelope.id) setDragOverEnvelopeId(null)
+                      }}
+                      onDrop={(event) => {
+                        event.preventDefault()
+                        const targetGroupId = group.id === 'ungrouped' ? null : group.id
+                        void dropEnvelopeOnEnvelope(envelope.id, targetGroupId)
+                      }}
+                      className={[
+                        'flex cursor-grab flex-col gap-2 rounded-xl border p-3.5 transition-all active:cursor-grabbing sm:flex-row sm:items-center',
+                        draggingEnvelopeId === envelope.id
+                          ? 'border-emerald-400 bg-emerald-50/80 opacity-75 shadow-sm dark:border-emerald-700 dark:bg-emerald-950/30'
+                          : dragOverEnvelopeId === envelope.id
+                            ? 'border-sky-400 bg-sky-50/70 ring-2 ring-sky-300/70 dark:border-sky-700 dark:bg-sky-950/30 dark:ring-sky-800/60'
+                            : 'border-zinc-200 dark:border-zinc-800',
+                      ].join(' ')}
+                    >
                       <div className="flex min-w-0 flex-1 items-center gap-3">
                         <span className="h-3 w-3 rounded-full" style={{ backgroundColor: envelope.color }} />
                         <div className="min-w-0">

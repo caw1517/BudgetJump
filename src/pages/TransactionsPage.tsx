@@ -75,6 +75,12 @@ type TransactionForm = {
   cleared: boolean
 }
 
+type SplitLine = {
+  id: string
+  envelopeId: string
+  amountDollars: string
+}
+
 const TODAY = new Date().toISOString().slice(0, 10)
 
 const DEFAULT_FORM: TransactionForm = {
@@ -111,6 +117,8 @@ export function TransactionsPage() {
   const [importAccountId, setImportAccountId] = useState('')
   const [selectedTransactionIds, setSelectedTransactionIds] = useState<string[]>([])
   const [bulkEnvelopeId, setBulkEnvelopeId] = useState('')
+  const [splitMode, setSplitMode] = useState(false)
+  const [splitLines, setSplitLines] = useState<SplitLine[]>([])
 
   const loadData = useCallback(async () => {
     setLoading(true)
@@ -218,6 +226,8 @@ export function TransactionsPage() {
       accountId: accounts[0]?.id ?? '',
     })
     setEditingId(null)
+    setSplitMode(false)
+    setSplitLines([])
   }
 
   function beginEdit(transaction: TransactionRow) {
@@ -240,6 +250,15 @@ export function TransactionsPage() {
     })
     setError(null)
     setNotice(null)
+    setSplitMode(false)
+    setSplitLines([])
+  }
+
+  function addSplitLine() {
+    setSplitLines((prev) => [
+      ...prev,
+      { id: crypto.randomUUID(), envelopeId: envelopes[0]?.id ?? '', amountDollars: '' },
+    ])
   }
 
   async function submitTransaction(event: FormEvent) {
@@ -250,8 +269,10 @@ export function TransactionsPage() {
       return
     }
     if (!form.envelopeId) {
-      setError('Select an envelope.')
-      return
+      if (!(splitMode && !editingId)) {
+        setError('Select an envelope.')
+        return
+      }
     }
     if (!form.accountId) {
       setError('Select an account. Every transaction is posted to an account register.')
@@ -271,6 +292,52 @@ export function TransactionsPage() {
     setError(null)
     setNotice(null)
     try {
+      if (!editingId && splitMode) {
+        if (splitLines.length < 2) {
+          setError('Add at least two split lines.')
+          return
+        }
+        const directionSign = amountCents < 0 ? -1 : 1
+        let splitSum = 0
+        for (const line of splitLines) {
+          if (!line.envelopeId) {
+            setError('Each split line needs an envelope.')
+            return
+          }
+          const part = dollarsStringToCents(line.amountDollars)
+          if (part == null || part <= 0) {
+            setError('Each split amount must be greater than 0.')
+            return
+          }
+          splitSum += part
+        }
+        if (splitSum !== Math.abs(amountCents)) {
+          setError(
+            `Split amounts must equal ${formatCurrencyFromCents(Math.abs(amountCents))}. Currently ${formatCurrencyFromCents(splitSum)}.`,
+          )
+          return
+        }
+        for (const line of splitLines) {
+          const part = dollarsStringToCents(line.amountDollars)!
+          const signedPart = directionSign < 0 ? -part : part
+          const { error: createError } = await getSupabase().rpc('create_manual_transaction', {
+            p_date: form.date,
+            p_payee: payee,
+            p_amount_cents: signedPart,
+            p_envelope_id: line.envelopeId,
+            p_note: form.note.trim() || null,
+            p_cleared: form.cleared,
+            p_account_id: form.accountId,
+            p_transaction_kind: form.transactionKind,
+          })
+          if (createError) throw createError
+        }
+        setNotice('Split transaction created.')
+        resetForm()
+        await loadData()
+        return
+      }
+
       if (editingId) {
         const { error: updateError } = await getSupabase().rpc('update_manual_transaction', {
           p_transaction_id: editingId,
@@ -972,6 +1039,32 @@ export function TransactionsPage() {
               credits cash back to the envelope (stored as a negative amount).
             </p>
           </label>
+          {!editingId && (
+            <label className="inline-flex min-h-11 items-center gap-2 text-sm font-medium text-zinc-700 dark:text-zinc-300 sm:col-span-2 xl:col-span-3">
+              <input
+                type="checkbox"
+                checked={splitMode}
+                onChange={(event) =>
+                  setSplitMode(() => {
+                    const next = event.target.checked
+                    if (next) {
+                      setSplitLines((prev) =>
+                        prev.length >= 2
+                          ? prev
+                          : [
+                              { id: crypto.randomUUID(), envelopeId: envelopes[0]?.id ?? '', amountDollars: '' },
+                              { id: crypto.randomUUID(), envelopeId: envelopes[0]?.id ?? '', amountDollars: '' },
+                            ],
+                      )
+                    }
+                    return next
+                  })
+                }
+                className="h-4 w-4 rounded border-zinc-300 text-emerald-600 focus:ring-emerald-500 dark:border-zinc-700 dark:bg-zinc-950"
+              />
+              Split this transaction across multiple envelopes
+            </label>
+          )}
           <label className="text-sm">
             <span className="mb-1 block text-zinc-700 dark:text-zinc-300">Amount ($)</span>
             <input
@@ -994,7 +1087,8 @@ export function TransactionsPage() {
               value={form.envelopeId}
               onChange={(event) => setForm((prev) => ({ ...prev, envelopeId: event.target.value }))}
             className="min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-950"
-              required
+              required={!splitMode || Boolean(editingId)}
+              disabled={splitMode && !editingId}
             >
               <option value="">Select envelope</option>
               {envelopes.map((envelope) => (
@@ -1007,6 +1101,64 @@ export function TransactionsPage() {
               Figure after the dot is the envelope balance (cash assigned to that category; can be negative if overspent).
             </p>
           </label>
+          {splitMode && !editingId && (
+            <div className="rounded-xl border border-zinc-200 p-3 dark:border-zinc-800 sm:col-span-2 xl:col-span-3">
+              <div className="mb-2 flex items-center justify-between">
+                <p className="text-sm font-medium">Split lines</p>
+                <button type="button" onClick={addSplitLine} className="btn-secondary px-3 text-xs">
+                  Add line
+                </button>
+              </div>
+              <div className="space-y-2">
+                {splitLines.map((line, idx) => (
+                  <div key={line.id} className="grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,1fr)_10rem_auto] sm:items-end">
+                    <label className="text-xs text-zinc-500 dark:text-zinc-400">
+                      Envelope #{idx + 1}
+                      <select
+                        value={line.envelopeId}
+                        onChange={(event) =>
+                          setSplitLines((prev) =>
+                            prev.map((r) => (r.id === line.id ? { ...r, envelopeId: event.target.value } : r)),
+                          )
+                        }
+                        className="mt-1 min-h-10 w-full rounded-lg border border-zinc-300 bg-white px-2.5 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-950"
+                      >
+                        <option value="">Select envelope</option>
+                        {envelopes.map((envelope) => (
+                          <option key={envelope.id} value={envelope.id}>
+                            {formatEnvelopeDropdownLabel(envelope.name, envelope.balance_cents)}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="text-xs text-zinc-500 dark:text-zinc-400">
+                      Amount ($)
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        value={line.amountDollars}
+                        onChange={(event) =>
+                          setSplitLines((prev) =>
+                            prev.map((r) => (r.id === line.id ? { ...r, amountDollars: event.target.value } : r)),
+                          )
+                        }
+                        className="mt-1 min-h-10 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-950"
+                        placeholder="0.00"
+                      />
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => setSplitLines((prev) => prev.filter((r) => r.id !== line.id))}
+                      disabled={splitLines.length <= 1}
+                      className="btn-danger min-h-10 px-3 text-xs disabled:opacity-50"
+                    >
+                      Remove
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
           <label className="text-sm">
             <span className="mb-1 block text-zinc-700 dark:text-zinc-300">Account</span>
             <select

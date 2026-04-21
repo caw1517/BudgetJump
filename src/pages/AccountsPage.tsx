@@ -495,6 +495,17 @@ export function AccountsPage() {
           minimumPaymentCents,
         })
         if (syncErr) throw syncErr
+      } else if (account.account_type === 'checking' || account.account_type === 'savings') {
+        const { error: nameUpdateError } = await supabase
+          .from('financial_accounts')
+          .update({ name })
+          .eq('id', accountId)
+        if (nameUpdateError) throw nameUpdateError
+        const { error: balSyncError } = await supabase.rpc('sync_account_balance_with_starting_paycheck', {
+          p_account_id: accountId,
+          p_new_balance_cents: balanceCents,
+        })
+        if (balSyncError) throw balSyncError
       } else {
         const { error: updateError } = await supabase
           .from('financial_accounts')
@@ -659,8 +670,9 @@ export function AccountsPage() {
         <h1 className="section-title">Accounts</h1>
         <p className="section-subtitle">
           See account totals, edit account details (name, APR, and for cards or loans minimum and planned payments), and
-          open an account register. Minimum payment on a card or loan is stored on the account and kept in sync with the
-          matching debt envelope’s monthly assignment target.
+          open an account register. For checking/savings, manual balance edits also update the related Starting balance
+          paycheck line in Journal so history stays consistent. Minimum payment on a card or loan is stored on the account
+          and kept in sync with the matching debt envelope’s monthly assignment target.
         </p>
         {error && <p className="mt-3 rounded-lg bg-red-50 p-3 text-sm text-red-800 dark:bg-red-950/40 dark:text-red-100">{error}</p>}
       </section>

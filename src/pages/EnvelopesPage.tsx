@@ -181,6 +181,7 @@ export function EnvelopesPage() {
   const [billPaidSavingId, setBillPaidSavingId] = useState<string | null>(null)
   const [monthlyAssignedByEnvelope, setMonthlyAssignedByEnvelope] = useState<Record<string, number>>({})
   const [assignmentMatrix, setAssignmentMatrix] = useState<Record<string, number>>({})
+  const [allAssignedByEnvelopeMonth, setAllAssignedByEnvelopeMonth] = useState<Record<string, number>>({})
   const [futureAssignedAfterViewByEnvelope, setFutureAssignedAfterViewByEnvelope] = useState<Record<string, number>>(
     {},
   )
@@ -253,6 +254,7 @@ export function EnvelopesPage() {
       setAccounts((accountsResp.data ?? []) as FinancialAccount[])
       const byEnvelope: Record<string, number> = {}
       const matrix: Record<string, number> = {}
+      const allAssigned: Record<string, number> = {}
       const futureByEnvelope: Record<string, number> = {}
       const viewMonthKey = format(activeEnvelopesViewMonth, 'yyyy-MM')
       const assignWindowStartMonth = format(assignStart, 'yyyy-MM')
@@ -264,6 +266,8 @@ export function EnvelopesPage() {
       }>) {
         const month = row.allocation_month?.slice(0, 7)
         if (!month) continue
+        const allKey = `${row.envelope_id}|${month}`
+        allAssigned[allKey] = (allAssigned[allKey] ?? 0) + row.amount_cents
         if (month >= assignWindowStartMonth && month <= assignWindowEndMonth) {
           const key = `${row.envelope_id}|${month}`
           matrix[key] = (matrix[key] ?? 0) + row.amount_cents
@@ -277,6 +281,7 @@ export function EnvelopesPage() {
       }
       setMonthlyAssignedByEnvelope(byEnvelope)
       setAssignmentMatrix(matrix)
+      setAllAssignedByEnvelopeMonth(allAssigned)
       setFutureAssignedAfterViewByEnvelope(futureByEnvelope)
       setGroupRename(
         Object.fromEntries((groupsResp.data ?? []).map((group) => [group.id, group.name])),
@@ -335,6 +340,18 @@ export function EnvelopesPage() {
         daysUntilNextDue(a.due_day_of_month!, today) - daysUntilNextDue(b.due_day_of_month!, today),
     )
   }, [activeEnvelopes])
+
+  const reservedAfterMonthForEnvelope = useCallback(
+    (envelopeId: string, monthKey: string): number => {
+      let total = 0
+      for (const [key, cents] of Object.entries(allAssignedByEnvelopeMonth)) {
+        const [envId, mk] = key.split('|')
+        if (envId === envelopeId && mk > monthKey) total += cents
+      }
+      return total
+    },
+    [allAssignedByEnvelopeMonth],
+  )
 
   const filteredMoves = useMemo(
     () =>
@@ -1147,6 +1164,40 @@ export function EnvelopesPage() {
               const mk = monthKeyFromDate(next)
               const paid = isBillPaidForMonth(e.bill_paid_by_month, mk)
               const busy = billPaidSavingId === e.id
+              const reservedAfterDueMonth = reservedAfterMonthForEnvelope(e.id, mk)
+              const availableForDueMonth = e.balance_cents - reservedAfterDueMonth
+              const fundingTarget =
+                e.budget_target_cents > 0
+                  ? e.budget_target_cents
+                  : e.goal_type === 'refill_up_to' && (e.goal_target_cents ?? 0) > 0
+                    ? (e.goal_target_cents ?? 0)
+                    : 0
+              const funded = fundingTarget > 0 ? availableForDueMonth >= fundingTarget : true
+              const shortfall = fundingTarget > 0 ? Math.max(fundingTarget - availableForDueMonth, 0) : 0
+              const fundingPct =
+                fundingTarget > 0
+                  ? Math.max(0, Math.min(100, Math.round((availableForDueMonth / fundingTarget) * 100)))
+                  : 0
+              const fundingTone =
+                fundingTarget <= 0
+                  ? 'text-zinc-500 dark:text-zinc-400'
+                  : funded
+                    ? 'text-emerald-700 dark:text-emerald-300'
+                    : days <= 3
+                      ? 'text-red-700 dark:text-red-300'
+                      : days <= 7
+                        ? 'text-amber-700 dark:text-amber-300'
+                        : 'text-yellow-700 dark:text-yellow-300'
+              const fundingBar =
+                fundingTarget <= 0
+                  ? 'bg-zinc-400'
+                  : funded
+                    ? 'bg-emerald-500'
+                    : days <= 3
+                      ? 'bg-red-500'
+                      : days <= 7
+                        ? 'bg-amber-500'
+                        : 'bg-yellow-500'
               return (
                 <li
                   key={e.id}
@@ -1161,6 +1212,38 @@ export function EnvelopesPage() {
                     {paid && (
                       <p className="mt-1 text-xs font-medium text-emerald-700 dark:text-emerald-300">Paid for this due month</p>
                     )}
+                    <div className="mt-1.5">
+                      {fundingTarget > 0 ? (
+                        <>
+                          <p className={['text-xs font-medium', fundingTone].join(' ')}>
+                            Funding for {mk}: {formatCurrencyFromCents(availableForDueMonth)} /{' '}
+                            {formatCurrencyFromCents(fundingTarget)}
+                            {funded
+                              ? ' (funded)'
+                              : ` (${formatCurrencyFromCents(shortfall)} short)`}
+                          </p>
+                          <div className="mt-1 h-1.5 w-full max-w-xs overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700">
+                            <div
+                              className={['h-full rounded-full', fundingBar].join(' ')}
+                              style={{ width: `${fundingPct}%` }}
+                            />
+                          </div>
+                          {!funded && (
+                            <p className={['mt-0.5 text-[11px]', fundingTone].join(' ')}>
+                              {days <= 3
+                                ? 'Urgent: due very soon and not fully funded.'
+                                : days <= 7
+                                  ? 'Due soon: still under target.'
+                                  : 'Under target for this bill month.'}
+                            </p>
+                          )}
+                        </>
+                      ) : (
+                        <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                          No monthly funding target set for this bill.
+                        </p>
+                      )}
+                    </div>
                   </div>
                   <div className="flex shrink-0 flex-wrap items-center gap-2">
                     <span className="text-xs font-medium text-emerald-800 dark:text-emerald-200">

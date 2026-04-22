@@ -96,6 +96,10 @@ const DEFAULT_FORM: TransactionForm = {
   cleared: false,
 }
 
+function balanceAfterTransaction(currentBalanceCents: number, transactionAmountCents: number): number {
+  return currentBalanceCents - transactionAmountCents
+}
+
 export function TransactionsPage() {
   const [envelopes, setEnvelopes] = useState<EnvelopeOption[]>([])
   const [accounts, setAccounts] = useState<FinancialAccount[]>([])
@@ -214,6 +218,56 @@ export function TransactionsPage() {
     () => Object.fromEntries(transactions.map((transaction) => [transaction.id, transaction])),
     [transactions],
   )
+  const accountById = useMemo(() => Object.fromEntries(accounts.map((a) => [a.id, a])), [accounts])
+  const envelopeById = useMemo(() => Object.fromEntries(envelopes.map((e) => [e.id, e])), [envelopes])
+
+  const formAmountCentsPreview = useMemo(
+    () =>
+      manualTransactionSignedCents(form.amountDollars, {
+        direction: form.direction,
+        transactionKind: form.transactionKind,
+      }),
+    [form.amountDollars, form.direction, form.transactionKind],
+  )
+
+  const manualPreview = useMemo(() => {
+    if (formAmountCentsPreview == null) return null
+    const account = form.accountId ? accountById[form.accountId] : null
+    const envelope = form.envelopeId ? envelopeById[form.envelopeId] : null
+    if (!account || !envelope || splitMode) return null
+    return {
+      accountName: account.name,
+      envelopeName: envelope.name,
+      accountAfterCents: balanceAfterTransaction(account.balance_cents, formAmountCentsPreview),
+      envelopeAfterCents: balanceAfterTransaction(envelope.balance_cents, formAmountCentsPreview),
+    }
+  }, [formAmountCentsPreview, form.accountId, form.envelopeId, accountById, envelopeById, splitMode])
+
+  const splitPreview = useMemo(() => {
+    if (!splitMode || editingId) return null
+    const account = form.accountId ? accountById[form.accountId] : null
+    if (!account) return null
+    const directionSign =
+      form.transactionKind === 'refund' || form.direction === 'inflow' ? -1 : 1
+    let totalSigned = 0
+    const envelopeRows: Array<{ name: string; afterCents: number }> = []
+    for (const line of splitLines) {
+      const base = dollarsStringToCents(line.amountDollars)
+      const env = line.envelopeId ? envelopeById[line.envelopeId] : null
+      if (base == null || base <= 0 || !env) continue
+      const signed = directionSign < 0 ? -base : base
+      totalSigned += signed
+      envelopeRows.push({
+        name: env.name,
+        afterCents: balanceAfterTransaction(env.balance_cents, signed),
+      })
+    }
+    return {
+      accountName: account.name,
+      accountAfterCents: balanceAfterTransaction(account.balance_cents, totalSigned),
+      envelopeRows,
+    }
+  }, [splitMode, editingId, form.accountId, form.direction, form.transactionKind, splitLines, accountById, envelopeById])
 
   const allFilteredSelected =
     filteredTransactions.length > 0 &&
@@ -984,6 +1038,46 @@ export function TransactionsPage() {
                     </select>
                   </div>
                 )}
+                {(() => {
+                  if (row.action === 'skip') return null
+                  if (row.amountCents == null) return null
+                  if (row.action === 'create') {
+                    const account = importAccountId ? accountById[importAccountId] : null
+                    const envelope = row.targetEnvelopeId ? envelopeById[row.targetEnvelopeId] : null
+                    if (!account || !envelope) return null
+                    return (
+                      <p className="mt-2 text-xs text-zinc-600 dark:text-zinc-300">
+                        After import: account {account.name} →{' '}
+                        <span className="font-medium">
+                          {formatCurrencyFromCents(balanceAfterTransaction(account.balance_cents, row.amountCents))}
+                        </span>
+                        {' · '}envelope {envelope.name} →{' '}
+                        <span className="font-medium">
+                          {formatCurrencyFromCents(balanceAfterTransaction(envelope.balance_cents, row.amountCents))}
+                        </span>
+                      </p>
+                    )
+                  }
+                  const existing = row.matchTransactionId ? transactionById[row.matchTransactionId] : null
+                  if (!existing) return null
+                  const accountId = existing.account_id ?? importAccountId
+                  const account = accountId ? accountById[accountId] : null
+                  const envelope = existing.envelope_id ? envelopeById[existing.envelope_id] : null
+                  if (!account || !envelope) return null
+                  const deltaAmount = row.amountCents - existing.amount_cents
+                  return (
+                    <p className="mt-2 text-xs text-zinc-600 dark:text-zinc-300">
+                      After update (delta {formatSignedCurrency(deltaAmount)}): account {account.name} →{' '}
+                      <span className="font-medium">
+                        {formatCurrencyFromCents(balanceAfterTransaction(account.balance_cents, deltaAmount))}
+                      </span>
+                      {' · '}envelope {envelope.name} →{' '}
+                      <span className="font-medium">
+                        {formatCurrencyFromCents(balanceAfterTransaction(envelope.balance_cents, deltaAmount))}
+                      </span>
+                    </p>
+                  )
+                })()}
               </div>
             ))}
           </div>
@@ -1232,6 +1326,31 @@ export function TransactionsPage() {
               </button>
             )}
           </div>
+          {manualPreview && (
+            <p className="sm:col-span-2 xl:col-span-3 text-xs text-zinc-600 dark:text-zinc-300">
+              Preview after save: account {manualPreview.accountName} →{' '}
+              <span className="font-medium">{formatCurrencyFromCents(manualPreview.accountAfterCents)}</span>
+              {' · '}envelope {manualPreview.envelopeName} →{' '}
+              <span className="font-medium">{formatCurrencyFromCents(manualPreview.envelopeAfterCents)}</span>
+            </p>
+          )}
+          {splitPreview && (
+            <div className="sm:col-span-2 xl:col-span-3 rounded-lg border border-zinc-200 p-2.5 text-xs dark:border-zinc-800">
+              <p className="text-zinc-600 dark:text-zinc-300">
+                Preview after save: account {splitPreview.accountName} →{' '}
+                <span className="font-medium">{formatCurrencyFromCents(splitPreview.accountAfterCents)}</span>
+              </p>
+              {splitPreview.envelopeRows.length > 0 && (
+                <div className="mt-1 space-y-0.5 text-zinc-600 dark:text-zinc-300">
+                  {splitPreview.envelopeRows.map((row) => (
+                    <p key={row.name}>
+                      • {row.name} → <span className="font-medium">{formatCurrencyFromCents(row.afterCents)}</span>
+                    </p>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
         </form>
       </CollapsibleCard>
 

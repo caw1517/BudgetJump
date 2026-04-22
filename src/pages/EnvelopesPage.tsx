@@ -308,14 +308,18 @@ export function EnvelopesPage() {
   }, [accounts, subscriptionEditingEnvelopeId, subscriptionForm.accountId])
 
   const groupedEnvelopes = useMemo(() => {
-    const activeGroups = groups.filter((group) => !group.archived)
-    const activeEnvelopes = envelopes.filter((envelope) => !envelope.archived)
+    const activeGroups = groups
+      .filter((group) => !group.archived)
+      .sort((a, b) => a.sort_order - b.sort_order)
+    const sortedActiveEnvelopes = envelopes
+      .filter((envelope) => !envelope.archived)
+      .sort((a, b) => (a.sort_order === b.sort_order ? a.name.localeCompare(b.name) : a.sort_order - b.sort_order))
     const byGroup = activeGroups.map((group) => ({
       id: group.id,
       label: group.name,
-      envelopes: activeEnvelopes.filter((envelope) => envelope.group_id === group.id),
+      envelopes: sortedActiveEnvelopes.filter((envelope) => envelope.group_id === group.id),
     }))
-    const ungrouped = activeEnvelopes.filter((envelope) => !envelope.group_id)
+    const ungrouped = sortedActiveEnvelopes.filter((envelope) => !envelope.group_id)
     if (ungrouped.length > 0) {
       byGroup.push({ id: 'ungrouped', label: DEFAULT_GROUP_LABEL, envelopes: ungrouped })
     }
@@ -1228,7 +1232,8 @@ export function EnvelopesPage() {
                   : e.goal_type === 'refill_up_to' && (e.goal_target_cents ?? 0) > 0
                     ? (e.goal_target_cents ?? 0)
                     : 0
-              const funded = fundingTarget > 0 ? availableForDueMonth >= fundingTarget : true
+              const funded =
+                paid || (fundingTarget > 0 ? availableForDueMonth >= fundingTarget : true)
               const shortfall = fundingTarget > 0 ? Math.max(fundingTarget - availableForDueMonth, 0) : 0
               const fundingPct =
                 fundingTarget > 0
@@ -1269,14 +1274,12 @@ export function EnvelopesPage() {
                       <p className="mt-1 text-xs font-medium text-emerald-700 dark:text-emerald-300">Paid for this due month</p>
                     )}
                     <div className="mt-1.5">
-                      {fundingTarget > 0 ? (
+                      {!paid && fundingTarget > 0 ? (
                         <>
                           <p className={['text-xs font-medium', fundingTone].join(' ')}>
                             Funding for {mk}: {formatCurrencyFromCents(availableForDueMonth)} /{' '}
                             {formatCurrencyFromCents(fundingTarget)}
-                            {funded
-                              ? ' (funded)'
-                              : ` (${formatCurrencyFromCents(shortfall)} short)`}
+                            {funded ? ' (funded)' : ` (${formatCurrencyFromCents(shortfall)} short)`}
                           </p>
                           <div className="mt-1 h-1.5 w-full max-w-xs overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700">
                             <div
@@ -1294,6 +1297,10 @@ export function EnvelopesPage() {
                             </p>
                           )}
                         </>
+                      ) : paid ? (
+                        <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                          Funding complete for this due month.
+                        </p>
                       ) : (
                         <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
                           No monthly funding target set for this bill.
@@ -1354,10 +1361,14 @@ export function EnvelopesPage() {
               className="min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
             >
               <option value="">Select envelope</option>
-              {activeEnvelopes.map((e) => (
-                <option key={e.id} value={e.id}>
-                  {formatEnvelopeDropdownLabel(e.name, e.balance_cents)}
-                </option>
+              {groupedEnvelopes.map((group) => (
+                <optgroup key={group.id} label={group.label}>
+                  {group.envelopes.map((envelope) => (
+                    <option key={envelope.id} value={envelope.id}>
+                      {formatEnvelopeDropdownLabel(envelope.name, envelope.balance_cents)}
+                    </option>
+                  ))}
+                </optgroup>
               ))}
             </select>
           </label>
@@ -1777,10 +1788,14 @@ export function EnvelopesPage() {
                   className="min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
                 >
                   <option value="">Select source envelope</option>
-                  {activeEnvelopes.map((envelope) => (
-                    <option key={envelope.id} value={envelope.id}>
-                      {formatEnvelopeDropdownLabel(envelope.name, envelope.balance_cents)}
-                    </option>
+                  {groupedEnvelopes.map((group) => (
+                    <optgroup key={group.id} label={group.label}>
+                      {group.envelopes.map((envelope) => (
+                        <option key={envelope.id} value={envelope.id}>
+                          {formatEnvelopeDropdownLabel(envelope.name, envelope.balance_cents)}
+                        </option>
+                      ))}
+                    </optgroup>
                   ))}
                 </select>
               </label>
@@ -1793,10 +1808,14 @@ export function EnvelopesPage() {
                   className="min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
                 >
                   <option value="">Select destination envelope</option>
-                  {activeEnvelopes.map((envelope) => (
-                    <option key={envelope.id} value={envelope.id} disabled={envelope.id === moveForm.fromEnvelopeId}>
-                      {formatEnvelopeDropdownLabel(envelope.name, envelope.balance_cents)}
-                    </option>
+                  {groupedEnvelopes.map((group) => (
+                    <optgroup key={group.id} label={group.label}>
+                      {group.envelopes.map((envelope) => (
+                        <option key={envelope.id} value={envelope.id} disabled={envelope.id === moveForm.fromEnvelopeId}>
+                          {formatEnvelopeDropdownLabel(envelope.name, envelope.balance_cents)}
+                        </option>
+                      ))}
+                    </optgroup>
                   ))}
                 </select>
               </label>
@@ -1881,10 +1900,14 @@ export function EnvelopesPage() {
                 onChange={(event) => setReconcileEnvelopeId(event.target.value)}
                 className="min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
               >
-                {activeEnvelopes.map((envelope) => (
-                  <option key={envelope.id} value={envelope.id}>
-                    {formatEnvelopeDropdownLabel(envelope.name, envelope.balance_cents)}
-                  </option>
+                {groupedEnvelopes.map((group) => (
+                  <optgroup key={group.id} label={group.label}>
+                    {group.envelopes.map((envelope) => (
+                      <option key={envelope.id} value={envelope.id}>
+                        {formatEnvelopeDropdownLabel(envelope.name, envelope.balance_cents)}
+                      </option>
+                    ))}
+                  </optgroup>
                 ))}
               </select>
             </label>

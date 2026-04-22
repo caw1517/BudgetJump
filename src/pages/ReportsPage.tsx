@@ -895,7 +895,7 @@ export function ReportsPage() {
 
   return (
     <div className="min-w-0 space-y-6 sm:space-y-7 xl:space-y-8 print:space-y-4">
-      <section className="card-surface min-w-0 overflow-x-hidden p-4 sm:p-6">
+      <section className="card-surface min-w-0 p-4 sm:p-6">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <h1 className="section-title">Reports</h1>
@@ -1056,7 +1056,7 @@ export function ReportsPage() {
             Primary range <strong>{fromDate}</strong> → <strong>{toDate}</strong> vs comparison <strong>{compareRangeLabel}</strong>.
           </p>
           <div className="table-frame">
-            <table className="w-full table-fixed border-collapse text-sm">
+            <table className="min-w-[760px] w-full border-collapse text-sm">
               <thead>
                 <tr className="border-b border-zinc-200 bg-zinc-50 text-left text-xs font-semibold uppercase tracking-wide text-zinc-700 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300">
                   <th className="p-2.5 align-top">Metric</th>
@@ -1129,7 +1129,7 @@ export function ReportsPage() {
           <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">No envelope-tagged spending in this range.</p>
         ) : (
           <div className="table-frame">
-            <table className="w-full table-fixed border-collapse text-sm">
+            <table className="min-w-[640px] w-full border-collapse text-sm">
               <thead>
                 <tr className="border-b border-zinc-200 bg-gradient-to-r from-emerald-50 to-white text-left text-xs font-semibold uppercase tracking-wide text-emerald-900 dark:border-zinc-800 dark:from-emerald-950/50 dark:to-zinc-950 dark:text-emerald-200">
                   <th className="w-[34%] p-2.5 align-top">Group</th>
@@ -1161,8 +1161,8 @@ export function ReportsPage() {
         {paycheckLinkedAllocations.length === 0 ? (
           <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">No paychecks in range, or no allocations on those paychecks.</p>
         ) : (
-          <div className="mt-3 min-w-0 overflow-x-hidden rounded-lg border border-zinc-200 dark:border-zinc-800">
-            <table className="w-full table-fixed border-collapse text-sm">
+          <div className="mt-3 min-w-0 overflow-x-auto rounded-lg border border-zinc-200 dark:border-zinc-800">
+            <table className="min-w-[860px] w-full border-collapse text-sm">
               <thead>
                 <tr className="border-b border-zinc-200 bg-gradient-to-r from-emerald-50 to-white text-left text-xs font-semibold uppercase tracking-wide text-emerald-900 dark:border-zinc-800 dark:from-emerald-950/50 dark:to-zinc-950 dark:text-emerald-200">
                   <th className="w-[11%] p-2.5 align-top">Paycheck date</th>
@@ -1202,8 +1202,8 @@ export function ReportsPage() {
         {envelopeMovesDetail.length === 0 ? (
           <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">No envelope moves in this range.</p>
         ) : (
-          <div className="mt-3 min-w-0 overflow-x-hidden rounded-lg border border-zinc-200 dark:border-zinc-800">
-            <table className="w-full table-fixed border-collapse text-sm">
+          <div className="mt-3 min-w-0 overflow-x-auto rounded-lg border border-zinc-200 dark:border-zinc-800">
+            <table className="min-w-[760px] w-full border-collapse text-sm">
               <thead>
                 <tr className="border-b border-zinc-200 bg-gradient-to-r from-sky-50 to-white text-left text-xs font-semibold uppercase tracking-wide text-sky-900 dark:border-zinc-800 dark:from-sky-950/40 dark:to-zinc-950 dark:text-sky-200">
                   <th className="w-[18%] p-2.5 align-top">When</th>
@@ -1241,8 +1241,8 @@ export function ReportsPage() {
         ) : (
           <div className="mt-3 space-y-4">
             {accountTransferPairs.length > 0 && (
-              <div className="min-w-0 overflow-x-hidden rounded-lg border border-zinc-200 dark:border-zinc-800">
-                <table className="w-full table-fixed border-collapse text-sm">
+              <div className="min-w-0 overflow-x-auto rounded-lg border border-zinc-200 dark:border-zinc-800">
+                <table className="min-w-[760px] w-full border-collapse text-sm">
                   <thead>
                     <tr className="border-b border-zinc-200 bg-gradient-to-r from-violet-50 to-white text-left text-xs font-semibold uppercase tracking-wide text-violet-900 dark:border-zinc-800 dark:from-violet-950/40 dark:to-zinc-950 dark:text-violet-200">
                       <th className="w-[12%] p-2.5 align-top">Date</th>
@@ -1271,8 +1271,8 @@ export function ReportsPage() {
                 <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
                   {accountTransferPairs.length > 0 ? 'Additional transfer lines (not paired)' : 'Transfer register lines'}
                 </p>
-                <div className="mt-2 min-w-0 overflow-x-hidden rounded-lg border border-zinc-200 dark:border-zinc-800">
-                  <table className="w-full table-fixed border-collapse text-sm">
+                <div className="mt-2 min-w-0 overflow-x-auto rounded-lg border border-zinc-200 dark:border-zinc-800">
+                  <table className="min-w-[760px] w-full border-collapse text-sm">
                     <thead>
                       <tr className="border-b border-zinc-200 bg-gradient-to-r from-violet-50 to-white text-left text-xs font-semibold uppercase tracking-wide text-violet-900 dark:border-zinc-800 dark:from-violet-950/40 dark:to-zinc-950 dark:text-violet-200">
                         <th className="w-[11%] p-2.5 align-top">Date</th>
@@ -1315,8 +1315,8 @@ export function ReportsPage() {
         {debtReportRows.length === 0 ? (
           <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">No credit card or loan accounts.</p>
         ) : (
-          <div className="mt-3 min-w-0 overflow-x-hidden rounded-lg border border-zinc-200 dark:border-zinc-800">
-            <table className="w-full table-fixed border-collapse text-sm">
+          <div className="mt-3 min-w-0 overflow-x-auto rounded-lg border border-zinc-200 dark:border-zinc-800">
+            <table className="min-w-[980px] w-full border-collapse text-sm">
               <thead>
                 <tr className="border-b border-zinc-200 bg-gradient-to-r from-amber-50 to-white text-left text-xs font-semibold uppercase tracking-wide text-amber-950 dark:border-zinc-800 dark:from-amber-950/40 dark:to-zinc-950 dark:text-amber-100">
                   <th className="w-[16%] p-2.5 align-top">Account</th>
@@ -1372,8 +1372,8 @@ export function ReportsPage() {
         {byEnvelope.length === 0 ? (
           <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">No envelope-tied transactions in this range.</p>
         ) : (
-          <div className="mt-3 min-w-0 overflow-x-hidden rounded-lg border border-zinc-200 dark:border-zinc-800">
-            <table className="w-full table-fixed border-collapse text-sm">
+          <div className="mt-3 min-w-0 overflow-x-auto rounded-lg border border-zinc-200 dark:border-zinc-800">
+            <table className="min-w-[680px] w-full border-collapse text-sm">
               <thead>
                 <tr className="border-b border-zinc-200 bg-zinc-50 text-left text-xs font-medium uppercase tracking-wide text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-400">
                   <th className="w-[36%] p-2.5 align-top">Envelope</th>
@@ -1411,8 +1411,8 @@ export function ReportsPage() {
         {fundedByEnvelope.length === 0 ? (
           <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">No allocations in range.</p>
         ) : (
-          <div className="mt-3 min-w-0 overflow-x-hidden rounded-lg border border-zinc-200 dark:border-zinc-800">
-            <table className="w-full table-fixed border-collapse text-sm">
+          <div className="mt-3 min-w-0 overflow-x-auto rounded-lg border border-zinc-200 dark:border-zinc-800">
+            <table className="min-w-[520px] w-full border-collapse text-sm">
               <thead>
                 <tr className="border-b border-zinc-200 bg-zinc-50 text-left text-xs font-medium uppercase tracking-wide text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-400">
                   <th className="w-[70%] p-2.5 align-top">Envelope</th>
@@ -1440,8 +1440,8 @@ export function ReportsPage() {
         {byAccount.length === 0 ? (
           <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">No account-linked transactions in range.</p>
         ) : (
-          <div className="mt-3 min-w-0 overflow-x-hidden rounded-lg border border-zinc-200 dark:border-zinc-800">
-            <table className="w-full table-fixed border-collapse text-sm">
+          <div className="mt-3 min-w-0 overflow-x-auto rounded-lg border border-zinc-200 dark:border-zinc-800">
+            <table className="min-w-[520px] w-full border-collapse text-sm">
               <thead>
                 <tr className="border-b border-zinc-200 bg-zinc-50 text-left text-xs font-medium uppercase tracking-wide text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-400">
                   <th className="w-[45%] p-2.5 align-top">Account</th>
@@ -1555,8 +1555,8 @@ export function ReportsPage() {
         {paychecks.length === 0 ? (
           <p className="text-sm text-zinc-500 dark:text-zinc-400">No paychecks dated in this range.</p>
         ) : (
-          <div className="mt-2 min-w-0 overflow-x-hidden rounded-lg border border-zinc-200 dark:border-zinc-800">
-            <table className="w-full table-fixed border-collapse text-sm">
+          <div className="mt-2 min-w-0 overflow-x-auto rounded-lg border border-zinc-200 dark:border-zinc-800">
+            <table className="min-w-[520px] w-full border-collapse text-sm">
               <thead>
                 <tr className="border-b border-zinc-200 bg-zinc-50 text-left text-xs font-medium uppercase tracking-wide text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-400">
                   <th className="w-[18%] p-2.5 align-top">Date</th>

@@ -15,6 +15,15 @@ type EnvelopeOption = {
   name: string
   archived: boolean
   balance_cents: number
+  sort_order: number
+  group_id: string | null
+}
+
+type EnvelopeGroup = {
+  id: string
+  name: string
+  sort_order: number
+  archived: boolean
 }
 
 type AccountType = 'checking' | 'savings' | 'credit_card' | 'debt' | 'cash' | 'other'
@@ -102,6 +111,7 @@ function balanceAfterTransaction(currentBalanceCents: number, transactionAmountC
 
 export function TransactionsPage() {
   const [envelopes, setEnvelopes] = useState<EnvelopeOption[]>([])
+  const [envelopeGroups, setEnvelopeGroups] = useState<EnvelopeGroup[]>([])
   const [accounts, setAccounts] = useState<FinancialAccount[]>([])
   const [transactions, setTransactions] = useState<TransactionRow[]>([])
   const [form, setForm] = useState<TransactionForm>(DEFAULT_FORM)
@@ -130,8 +140,17 @@ export function TransactionsPage() {
     setError(null)
     try {
       const supabase = getSupabase()
-      const [envelopesResp, accountsResp, transactionsResp] = await Promise.all([
-        supabase.from('envelopes').select('id,name,archived,balance_cents').eq('archived', false).order('name', { ascending: true }),
+      const [groupsResp, envelopesResp, accountsResp, transactionsResp] = await Promise.all([
+        supabase
+          .from('envelope_groups')
+          .select('id,name,sort_order,archived')
+          .order('sort_order', { ascending: true }),
+        supabase
+          .from('envelopes')
+          .select('id,name,archived,balance_cents,sort_order,group_id')
+          .eq('archived', false)
+          .order('sort_order', { ascending: true })
+          .order('name', { ascending: true }),
         supabase
           .from('financial_accounts')
           .select('id,name,account_type,archived,balance_cents')
@@ -145,10 +164,12 @@ export function TransactionsPage() {
           .order('date', { ascending: false })
           .order('created_at', { ascending: false }),
       ])
+      if (groupsResp.error) throw groupsResp.error
       if (envelopesResp.error) throw envelopesResp.error
       if (accountsResp.error) throw accountsResp.error
       if (transactionsResp.error) throw transactionsResp.error
 
+      setEnvelopeGroups((groupsResp.data ?? []) as EnvelopeGroup[])
       setEnvelopes(envelopesResp.data ?? [])
       setAccounts(accountsResp.data ?? [])
       setTransactions((transactionsResp.data ?? []) as unknown as TransactionRow[])
@@ -185,6 +206,31 @@ export function TransactionsPage() {
       return true
     })
   }, [transactions, filterEnvelopeId, filterCleared, filterFromDate, filterToDate, search])
+
+  const orderedEnvelopes = useMemo(
+    () =>
+      envelopes
+        .filter((envelope) => !envelope.archived)
+        .sort((a, b) =>
+          a.sort_order === b.sort_order ? a.name.localeCompare(b.name) : a.sort_order - b.sort_order,
+        ),
+    [envelopes],
+  )
+  const groupedEnvelopeOptions = useMemo(() => {
+    const activeGroups = envelopeGroups
+      .filter((group) => !group.archived)
+      .sort((a, b) => a.sort_order - b.sort_order)
+    const grouped = activeGroups
+      .map((group) => ({
+        id: group.id,
+        label: group.name,
+        envelopes: orderedEnvelopes.filter((envelope) => envelope.group_id === group.id),
+      }))
+      .filter((group) => group.envelopes.length > 0)
+    const ungrouped = orderedEnvelopes.filter((envelope) => !envelope.group_id)
+    if (ungrouped.length > 0) grouped.push({ id: 'ungrouped', label: 'Ungrouped', envelopes: ungrouped })
+    return grouped
+  }, [envelopeGroups, orderedEnvelopes])
 
   const categorySummary = useMemo(() => {
     const rows = transactions.filter((transaction) => {
@@ -277,7 +323,7 @@ export function TransactionsPage() {
     setForm({
       ...DEFAULT_FORM,
       direction: 'outflow',
-      envelopeId: envelopes[0]?.id ?? '',
+      envelopeId: orderedEnvelopes[0]?.id ?? '',
       accountId: accounts[0]?.id ?? '',
     })
     setEditingId(null)
@@ -298,7 +344,7 @@ export function TransactionsPage() {
         transaction.transaction_kind === 'refund'
           ? transaction.transaction_kind
           : 'regular',
-      envelopeId: transaction.envelope_id ?? envelopes[0]?.id ?? '',
+      envelopeId: transaction.envelope_id ?? orderedEnvelopes[0]?.id ?? '',
       accountId: transaction.account_id ?? accounts[0]?.id ?? '',
       note: transaction.note ?? '',
       cleared: transaction.cleared,
@@ -312,7 +358,7 @@ export function TransactionsPage() {
   function addSplitLine() {
     setSplitLines((prev) => [
       ...prev,
-      { id: crypto.randomUUID(), envelopeId: envelopes[0]?.id ?? '', amountDollars: '' },
+      { id: crypto.randomUUID(), envelopeId: orderedEnvelopes[0]?.id ?? '', amountDollars: '' },
     ])
   }
 
@@ -443,6 +489,30 @@ export function TransactionsPage() {
       await loadData()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not archive transaction.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function deleteTransactionPermanently(id: string) {
+    const confirmed = window.confirm(
+      'Permanently delete this transaction? This cannot be undone and will remove it from the database.',
+    )
+    if (!confirmed) return
+
+    setSaving(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const { error: deleteError } = await getSupabase().rpc('delete_transaction_permanently', {
+        p_transaction_id: id,
+      })
+      if (deleteError) throw deleteError
+      if (editingId === id) resetForm()
+      setNotice('Transaction permanently deleted.')
+      await loadData()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not delete transaction.')
     } finally {
       setSaving(false)
     }
@@ -1002,10 +1072,14 @@ export function TransactionsPage() {
                       className="mt-1 min-h-10 w-full rounded-lg border border-zinc-300 bg-white px-2 text-xs dark:border-zinc-700 dark:bg-zinc-950"
                     >
                       <option value="">Select envelope</option>
-                      {envelopes.map((envelope) => (
-                        <option key={envelope.id} value={envelope.id}>
-                          {formatEnvelopeDropdownLabel(envelope.name, envelope.balance_cents)}
-                        </option>
+                      {groupedEnvelopeOptions.map((group) => (
+                        <optgroup key={group.id} label={group.label}>
+                          {group.envelopes.map((envelope) => (
+                            <option key={envelope.id} value={envelope.id}>
+                              {formatEnvelopeDropdownLabel(envelope.name, envelope.balance_cents)}
+                            </option>
+                          ))}
+                        </optgroup>
                       ))}
                     </select>
                   </div>
@@ -1147,8 +1221,8 @@ export function TransactionsPage() {
                         prev.length >= 2
                           ? prev
                           : [
-                              { id: crypto.randomUUID(), envelopeId: envelopes[0]?.id ?? '', amountDollars: '' },
-                              { id: crypto.randomUUID(), envelopeId: envelopes[0]?.id ?? '', amountDollars: '' },
+                              { id: crypto.randomUUID(), envelopeId: orderedEnvelopes[0]?.id ?? '', amountDollars: '' },
+                              { id: crypto.randomUUID(), envelopeId: orderedEnvelopes[0]?.id ?? '', amountDollars: '' },
                             ],
                       )
                     }
@@ -1189,10 +1263,14 @@ export function TransactionsPage() {
               disabled={splitMode && !editingId}
             >
               <option value="">Select envelope</option>
-              {envelopes.map((envelope) => (
-                <option key={envelope.id} value={envelope.id}>
-                  {formatEnvelopeDropdownLabel(envelope.name, envelope.balance_cents)}
-                </option>
+              {groupedEnvelopeOptions.map((group) => (
+                <optgroup key={group.id} label={group.label}>
+                  {group.envelopes.map((envelope) => (
+                    <option key={envelope.id} value={envelope.id}>
+                      {formatEnvelopeDropdownLabel(envelope.name, envelope.balance_cents)}
+                    </option>
+                  ))}
+                </optgroup>
               ))}
             </select>
             <p className="mt-1 text-[11px] text-zinc-500 dark:text-zinc-400">
@@ -1222,10 +1300,14 @@ export function TransactionsPage() {
                         className="mt-1 min-h-10 w-full rounded-lg border border-zinc-300 bg-white px-2.5 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-950"
                       >
                         <option value="">Select envelope</option>
-                        {envelopes.map((envelope) => (
-                          <option key={envelope.id} value={envelope.id}>
-                            {formatEnvelopeDropdownLabel(envelope.name, envelope.balance_cents)}
-                          </option>
+                        {groupedEnvelopeOptions.map((group) => (
+                          <optgroup key={group.id} label={group.label}>
+                            {group.envelopes.map((envelope) => (
+                              <option key={envelope.id} value={envelope.id}>
+                                {formatEnvelopeDropdownLabel(envelope.name, envelope.balance_cents)}
+                              </option>
+                            ))}
+                          </optgroup>
                         ))}
                       </select>
                     </label>
@@ -1394,10 +1476,14 @@ export function TransactionsPage() {
             className="min-h-11 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-950"
           >
             <option value="">All envelopes</option>
-            {envelopes.map((envelope) => (
-              <option key={envelope.id} value={envelope.id}>
-                {formatEnvelopeDropdownLabel(envelope.name, envelope.balance_cents)}
-              </option>
+            {groupedEnvelopeOptions.map((group) => (
+              <optgroup key={group.id} label={group.label}>
+                {group.envelopes.map((envelope) => (
+                  <option key={envelope.id} value={envelope.id}>
+                    {formatEnvelopeDropdownLabel(envelope.name, envelope.balance_cents)}
+                  </option>
+                ))}
+              </optgroup>
             ))}
           </select>
           <select
@@ -1485,10 +1571,14 @@ export function TransactionsPage() {
             className="min-h-10 rounded-lg border border-zinc-300 bg-white px-2 text-xs dark:border-zinc-700 dark:bg-zinc-950"
           >
             <option value="">Bulk assign envelope...</option>
-            {envelopes.map((envelope) => (
-              <option key={envelope.id} value={envelope.id}>
-                {formatEnvelopeDropdownLabel(envelope.name, envelope.balance_cents)}
-              </option>
+            {groupedEnvelopeOptions.map((group) => (
+              <optgroup key={group.id} label={group.label}>
+                {group.envelopes.map((envelope) => (
+                  <option key={envelope.id} value={envelope.id}>
+                    {formatEnvelopeDropdownLabel(envelope.name, envelope.balance_cents)}
+                  </option>
+                ))}
+              </optgroup>
             ))}
           </select>
           <button
@@ -1589,6 +1679,13 @@ export function TransactionsPage() {
                     className="btn-danger px-3 text-xs"
                   >
                     Archive
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void deleteTransactionPermanently(transaction.id)}
+                    className="min-h-9 rounded-lg border border-red-600 px-3 text-xs font-medium text-red-700 hover:bg-red-50 dark:border-red-500 dark:text-red-300 dark:hover:bg-red-950/40"
+                  >
+                    Delete
                   </button>
                 </div>
               </div>

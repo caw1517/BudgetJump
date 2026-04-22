@@ -17,6 +17,15 @@ type EnvelopeOption = {
   id: string
   name: string
   balance_cents: number
+  sort_order: number
+  group_id: string | null
+}
+
+type EnvelopeGroup = {
+  id: string
+  name: string
+  sort_order: number
+  archived: boolean
 }
 
 type FinancialAccount = {
@@ -82,6 +91,7 @@ function aprPercentStringToBps(value: string): number | null {
 export function AccountsPage() {
   const [accounts, setAccounts] = useState<FinancialAccount[]>([])
   const [envelopes, setEnvelopes] = useState<EnvelopeOption[]>([])
+  const [envelopeGroups, setEnvelopeGroups] = useState<EnvelopeGroup[]>([])
   const [transactions, setTransactions] = useState<AccountTransaction[]>([])
   const [paycheckDeposits, setPaycheckDeposits] = useState<PaycheckDeposit[]>([])
   const [activeAccountId, setActiveAccountId] = useState('')
@@ -118,7 +128,7 @@ export function AccountsPage() {
     setError(null)
     try {
       const supabase = getSupabase()
-      const [accountsResp, envelopesResp, txResp, paycheckResp] = await Promise.all([
+      const [accountsResp, groupsResp, envelopesResp, txResp, paycheckResp] = await Promise.all([
         supabase
           .from('financial_accounts')
           .select(
@@ -127,7 +137,16 @@ export function AccountsPage() {
           .eq('archived', false)
           .order('sort_order', { ascending: true })
           .order('name', { ascending: true }),
-        supabase.from('envelopes').select('id,name,balance_cents').eq('archived', false).order('name', { ascending: true }),
+        supabase
+          .from('envelope_groups')
+          .select('id,name,sort_order,archived')
+          .order('sort_order', { ascending: true }),
+        supabase
+          .from('envelopes')
+          .select('id,name,balance_cents,sort_order,group_id')
+          .eq('archived', false)
+          .order('sort_order', { ascending: true })
+          .order('name', { ascending: true }),
         supabase
           .from('transactions')
           .select('id,date,payee,amount_cents,cleared,note,account_id,created_at')
@@ -143,6 +162,7 @@ export function AccountsPage() {
           .order('created_at', { ascending: false }),
       ])
       if (accountsResp.error) throw accountsResp.error
+      if (groupsResp.error) throw groupsResp.error
       if (envelopesResp.error) throw envelopesResp.error
       if (txResp.error) throw txResp.error
       if (paycheckResp.error) throw paycheckResp.error
@@ -176,6 +196,7 @@ export function AccountsPage() {
       setBalanceDrafts(
         Object.fromEntries(loadedAccounts.map((a) => [a.id, (a.balance_cents / 100).toFixed(2)])),
       )
+      setEnvelopeGroups((groupsResp.data ?? []) as EnvelopeGroup[])
       setEnvelopes((envelopesResp.data ?? []) as EnvelopeOption[])
       setTransactions((txResp.data ?? []) as AccountTransaction[])
       setPaycheckDeposits((paycheckResp.data ?? []) as PaycheckDeposit[])
@@ -222,6 +243,28 @@ export function AccountsPage() {
     () => accounts.find((account) => account.id === activeAccountId) ?? null,
     [accounts, activeAccountId],
   )
+  const orderedEnvelopes = useMemo(
+    () =>
+      [...envelopes].sort((a, b) =>
+        a.sort_order === b.sort_order ? a.name.localeCompare(b.name) : a.sort_order - b.sort_order,
+      ),
+    [envelopes],
+  )
+  const groupedEnvelopeOptions = useMemo(() => {
+    const activeGroups = envelopeGroups
+      .filter((group) => !group.archived)
+      .sort((a, b) => a.sort_order - b.sort_order)
+    const grouped = activeGroups
+      .map((group) => ({
+        id: group.id,
+        label: group.name,
+        envelopes: orderedEnvelopes.filter((envelope) => envelope.group_id === group.id),
+      }))
+      .filter((group) => group.envelopes.length > 0)
+    const ungrouped = orderedEnvelopes.filter((envelope) => !envelope.group_id)
+    if (ungrouped.length > 0) grouped.push({ id: 'ungrouped', label: 'Ungrouped', envelopes: ungrouped })
+    return grouped
+  }, [envelopeGroups, orderedEnvelopes])
 
   const registerRows = useMemo(() => {
     if (!activeAccountId || !activeAccount) return []
@@ -975,10 +1018,14 @@ export function AccountsPage() {
               className="min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
             >
               <option value="">Select envelope</option>
-              {envelopes.map((envelope) => (
-                <option key={envelope.id} value={envelope.id}>
-                  {formatEnvelopeDropdownLabel(envelope.name, envelope.balance_cents)}
-                </option>
+              {groupedEnvelopeOptions.map((group) => (
+                <optgroup key={group.id} label={group.label}>
+                  {group.envelopes.map((envelope) => (
+                    <option key={envelope.id} value={envelope.id}>
+                      {formatEnvelopeDropdownLabel(envelope.name, envelope.balance_cents)}
+                    </option>
+                  ))}
+                </optgroup>
               ))}
             </select>
             <p className="mt-1 text-[11px] leading-relaxed text-zinc-500 dark:text-zinc-400">

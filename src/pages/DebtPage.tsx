@@ -34,6 +34,15 @@ type EnvelopeRow = {
   name: string
   type: string
   balance_cents: number
+  sort_order: number
+  group_id: string | null
+}
+
+type EnvelopeGroup = {
+  id: string
+  name: string
+  sort_order: number
+  archived: boolean
 }
 
 type LiabilityTx = {
@@ -58,6 +67,7 @@ function estimatedMonthlyInterestCents(balanceCents: number, aprBps: number | nu
 export function DebtPage() {
   const [liabilities, setLiabilities] = useState<LiabilityAccount[]>([])
   const [envelopes, setEnvelopes] = useState<EnvelopeRow[]>([])
+  const [envelopeGroups, setEnvelopeGroups] = useState<EnvelopeGroup[]>([])
   const [allAccounts, setAllAccounts] = useState<
     Array<{ id: string; name: string; account_type: AccountType; balance_cents: number }>
   >([])
@@ -84,7 +94,7 @@ export function DebtPage() {
     setError(null)
     try {
       const supabase = getSupabase()
-      const [accountsResp, envResp] = await Promise.all([
+      const [accountsResp, groupsResp, envResp] = await Promise.all([
         supabase
           .from('financial_accounts')
           .select(
@@ -93,9 +103,19 @@ export function DebtPage() {
           .eq('archived', false)
           .order('sort_order', { ascending: true })
           .order('name', { ascending: true }),
-        supabase.from('envelopes').select('id,name,type,balance_cents').eq('archived', false).order('name', { ascending: true }),
+        supabase
+          .from('envelope_groups')
+          .select('id,name,sort_order,archived')
+          .order('sort_order', { ascending: true }),
+        supabase
+          .from('envelopes')
+          .select('id,name,type,balance_cents,sort_order,group_id')
+          .eq('archived', false)
+          .order('sort_order', { ascending: true })
+          .order('name', { ascending: true }),
       ])
       if (accountsResp.error) throw accountsResp.error
+      if (groupsResp.error) throw groupsResp.error
       if (envResp.error) throw envResp.error
 
       const loaded = (accountsResp.data ?? []) as Array<{
@@ -112,6 +132,7 @@ export function DebtPage() {
         return a.account_type === 'credit_card' || a.account_type === 'debt'
       })
       setLiabilities(liab)
+      setEnvelopeGroups((groupsResp.data ?? []) as EnvelopeGroup[])
       setEnvelopes((envResp.data ?? []) as EnvelopeRow[])
 
       const liabIds = liab.map((a) => a.id)
@@ -197,6 +218,28 @@ export function DebtPage() {
     }
     return map
   }, [envelopes])
+  const orderedEnvelopes = useMemo(
+    () =>
+      [...envelopes].sort((a, b) =>
+        a.sort_order === b.sort_order ? a.name.localeCompare(b.name) : a.sort_order - b.sort_order,
+      ),
+    [envelopes],
+  )
+  const groupedEnvelopeOptions = useMemo(() => {
+    const activeGroups = envelopeGroups
+      .filter((group) => !group.archived)
+      .sort((a, b) => a.sort_order - b.sort_order)
+    const grouped = activeGroups
+      .map((group) => ({
+        id: group.id,
+        label: group.name,
+        envelopes: orderedEnvelopes.filter((envelope) => envelope.group_id === group.id),
+      }))
+      .filter((group) => group.envelopes.length > 0)
+    const ungrouped = orderedEnvelopes.filter((envelope) => !envelope.group_id)
+    if (ungrouped.length > 0) grouped.push({ id: 'ungrouped', label: 'Ungrouped', envelopes: ungrouped })
+    return grouped
+  }, [envelopeGroups, orderedEnvelopes])
 
   const cashAccounts = useMemo(
     () => allAccounts.filter((a) => a.account_type !== 'credit_card' && a.account_type !== 'debt'),
@@ -852,10 +895,14 @@ export function DebtPage() {
               onChange={(e) => setPayFromEnvelopeId(e.target.value)}
               className="min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
             >
-              {envelopes.map((env) => (
-                <option key={env.id} value={env.id}>
-                  {formatEnvelopeDropdownLabel(env.name, env.balance_cents)}
-                </option>
+              {groupedEnvelopeOptions.map((group) => (
+                <optgroup key={group.id} label={group.label}>
+                  {group.envelopes.map((env) => (
+                    <option key={env.id} value={env.id}>
+                      {formatEnvelopeDropdownLabel(env.name, env.balance_cents)}
+                    </option>
+                  ))}
+                </optgroup>
               ))}
             </select>
           </label>

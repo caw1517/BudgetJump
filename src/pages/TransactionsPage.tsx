@@ -6,6 +6,7 @@ import {
   formatAccountDropdownLabel,
   formatCurrencyFromCents,
   formatEnvelopeDropdownLabel,
+  normalizeDollarsInput,
 } from '../lib/currency'
 import { getSupabase } from '../lib/supabase'
 
@@ -1072,6 +1073,9 @@ export function TransactionsPage() {
               inputMode="decimal"
               value={form.amountDollars}
               onChange={(event) => setForm((prev) => ({ ...prev, amountDollars: event.target.value }))}
+              onBlur={(event) =>
+                setForm((prev) => ({ ...prev, amountDollars: normalizeDollarsInput(event.target.value) }))
+              }
               placeholder="0.00"
             className="min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-950"
               required
@@ -1140,6 +1144,15 @@ export function TransactionsPage() {
                         onChange={(event) =>
                           setSplitLines((prev) =>
                             prev.map((r) => (r.id === line.id ? { ...r, amountDollars: event.target.value } : r)),
+                          )
+                        }
+                        onBlur={(event) =>
+                          setSplitLines((prev) =>
+                            prev.map((r) =>
+                              r.id === line.id
+                                ? { ...r, amountDollars: normalizeDollarsInput(event.target.value) }
+                                : r,
+                            ),
                           )
                         }
                         className="mt-1 min-h-10 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-950"

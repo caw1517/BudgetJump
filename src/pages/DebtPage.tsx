@@ -7,6 +7,7 @@ import {
   formatAccountDropdownLabel,
   formatCurrencyFromCents,
   formatEnvelopeDropdownLabel,
+  normalizeDollarsInput,
 } from '../lib/currency'
 import { syncDebtEnvelopeMonthlyGoalFromMinimum } from '../lib/debtEnvelopeSync'
 import {
@@ -675,6 +676,15 @@ export function DebtPage() {
                             [acc.id]: { ...(prev[acc.id] ?? { min: '', planned: '' }), min: e.target.value },
                           }))
                         }
+                        onBlur={(e) =>
+                          setPaySettingsDraft((prev) => ({
+                            ...prev,
+                            [acc.id]: {
+                              ...(prev[acc.id] ?? { min: '', planned: '' }),
+                              min: normalizeDollarsInput(e.target.value),
+                            },
+                          }))
+                        }
                         placeholder="0.00"
                         className="mt-1 min-h-10 w-full rounded-lg border border-zinc-300 bg-white px-2.5 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-950"
                       />
@@ -689,6 +699,15 @@ export function DebtPage() {
                           setPaySettingsDraft((prev) => ({
                             ...prev,
                             [acc.id]: { ...(prev[acc.id] ?? { min: '', planned: '' }), planned: e.target.value },
+                          }))
+                        }
+                        onBlur={(e) =>
+                          setPaySettingsDraft((prev) => ({
+                            ...prev,
+                            [acc.id]: {
+                              ...(prev[acc.id] ?? { min: '', planned: '' }),
+                              planned: normalizeDollarsInput(e.target.value),
+                            },
                           }))
                         }
                         placeholder="Optional"
@@ -847,6 +866,7 @@ export function DebtPage() {
               inputMode="decimal"
               value={payAmountDollars}
               onChange={(e) => setPayAmountDollars(e.target.value)}
+              onBlur={(e) => setPayAmountDollars(normalizeDollarsInput(e.target.value))}
               placeholder="0.00"
               className="min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
             />

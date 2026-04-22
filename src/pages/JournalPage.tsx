@@ -6,7 +6,9 @@ import {
   formatAccountDropdownLabel,
   formatCurrencyFromCents,
   formatEnvelopeDropdownLabel,
+  normalizeDollarsInput,
 } from '../lib/currency'
+import { formatDueDayPhrase } from '../lib/envelopeDueDates'
 import { getSupabase } from '../lib/supabase'
 
 function envelopeMovesCreatedAtFilter(fromDate: string, toDate: string): { gte: string; lt: string } {
@@ -19,6 +21,15 @@ function envelopeMovesCreatedAtFilter(fromDate: string, toDate: string): { gte: 
   }
 }
 
+function parseIsoDateLocal(value: string): Date {
+  const [yRaw, mRaw, dRaw] = value.slice(0, 10).split('-')
+  const y = Number.parseInt(yRaw ?? '', 10)
+  const m = Number.parseInt(mRaw ?? '', 10)
+  const d = Number.parseInt(dRaw ?? '', 10)
+  if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return new Date(value)
+  return new Date(y, m - 1, d)
+}
+
 type Envelope = {
   id: string
   name: string
@@ -26,6 +37,17 @@ type Envelope = {
   budget_target_cents: number
   goal_type: 'assign_monthly' | 'refill_up_to' | null
   goal_target_cents: number | null
+  sort_order: number
+  group_id: string | null
+  due_day_of_month: number | null
+  archived: boolean
+}
+
+type EnvelopeGroup = {
+  id: string
+  name: string
+  sort_order: number
+  archived: boolean
 }
 
 type PaycheckSummary = {
@@ -71,6 +93,11 @@ type AllocationLine = {
   allocationMonth: string
 }
 
+type GroupedEnvelopeOptions = Array<{
+  groupLabel: string
+  envelopes: Envelope[]
+}>
+
 function newAllocationLineId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
     return crypto.randomUUID()
@@ -83,6 +110,24 @@ function unwrapPaycheckSourceRelation(
 ): { name: string; expected_amount_cents: number } | null {
   if (!rel) return null
   return Array.isArray(rel) ? (rel[0] ?? null) : rel
+}
+
+type PaycheckReportRowForExtra = {
+  net_amount_cents: number
+  paycheck_sources?: { expected_amount_cents: number } | { expected_amount_cents: number }[] | null
+}
+
+function sumPaycheckExtraOverExpectedCents(rows: PaycheckReportRowForExtra[]): number {
+  let sum = 0
+  for (const row of rows) {
+    const rel = row.paycheck_sources
+    if (!rel) continue
+    const src = Array.isArray(rel) ? rel[0] : rel
+    const expected = src?.expected_amount_cents
+    if (typeof expected !== 'number') continue
+    if (row.net_amount_cents > expected) sum += row.net_amount_cents - expected
+  }
+  return sum
 }
 
 type DatePreset = 'this_month' | 'last_30' | 'last_90' | 'all_time' | 'custom'
@@ -123,6 +168,7 @@ const PaycheckSourceRowEditor = memo(function PaycheckSourceRowEditor(props: {
           inputMode="decimal"
           value={expectedDollars}
           onChange={(e) => setExpectedDollars(e.target.value)}
+          onBlur={(e) => setExpectedDollars(normalizeDollarsInput(e.target.value))}
           disabled={props.row.archived || props.busy}
           className="min-h-10 w-full rounded-lg border border-zinc-300 bg-white px-2.5 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
         />
@@ -154,6 +200,7 @@ const PaycheckSourceRowEditor = memo(function PaycheckSourceRowEditor(props: {
 
 export function JournalPage() {
   const [envelopes, setEnvelopes] = useState<Envelope[]>([])
+  const [envelopeGroups, setEnvelopeGroups] = useState<EnvelopeGroup[]>([])
   const [history, setHistory] = useState<PaycheckSummary[]>([])
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -221,6 +268,7 @@ export function JournalPage() {
   const [reportOverspentEnvelopes, setReportOverspentEnvelopes] = useState<
     Array<{ name: string; balance_cents: number }>
   >([])
+  const [reportExtraOverExpectedCents, setReportExtraOverExpectedCents] = useState(0)
   const currentMonthForNewRows = format(new Date(), 'yyyy-MM')
   const defaultAllocationMonth = date.slice(0, 7)
   const [assignedByEnvelopeMonth, setAssignedByEnvelopeMonth] = useState<Record<string, number>>({})
@@ -242,11 +290,18 @@ export function JournalPage() {
     setError(null)
     try {
       const supabase = getSupabase()
-      const [envelopesResp, historyResp, assignmentsResp, accountsResp, sourcesResp] = await Promise.all([
+      const [groupsResp, envelopesResp, historyResp, assignmentsResp, accountsResp, sourcesResp] = await Promise.all([
+        supabase
+          .from('envelope_groups')
+          .select('id,name,sort_order,archived')
+          .order('sort_order', { ascending: true }),
         supabase
           .from('envelopes')
-          .select('id,name,balance_cents,budget_target_cents,goal_type,goal_target_cents')
+          .select(
+            'id,name,balance_cents,budget_target_cents,goal_type,goal_target_cents,sort_order,group_id,due_day_of_month,archived',
+          )
           .eq('archived', false)
+          .order('sort_order', { ascending: true })
           .order('name', { ascending: true }),
         supabase
           .from('paychecks')
@@ -266,16 +321,19 @@ export function JournalPage() {
           .order('sort_order', { ascending: true })
           .order('name', { ascending: true }),
       ])
+      if (groupsResp.error) throw groupsResp.error
       if (envelopesResp.error) throw envelopesResp.error
       if (historyResp.error) throw historyResp.error
       if (assignmentsResp.error) throw assignmentsResp.error
       if (accountsResp.error) throw accountsResp.error
       if (sourcesResp.error) throw sourcesResp.error
       const loadedEnvelopes = (envelopesResp.data ?? []) as Envelope[]
+      const loadedGroups = (groupsResp.data ?? []) as EnvelopeGroup[]
       const depositCandidates = ((accountsResp.data ?? []) as DepositAccount[]).filter(
         (account) => account.account_type !== 'credit_card' && account.account_type !== 'debt',
       )
       setEnvelopes(loadedEnvelopes)
+      setEnvelopeGroups(loadedGroups)
       setDepositAccounts(depositCandidates)
       setHistory((historyResp.data ?? []) as PaycheckSummary[])
       setPaycheckSources((sourcesResp.data ?? []) as PaycheckSource[])
@@ -308,6 +366,29 @@ export function JournalPage() {
   }, [loadData])
 
   const netCents = dollarsStringToCents(netDollars) ?? 0
+  const orderedActiveEnvelopes = useMemo(
+    () =>
+      envelopes
+        .filter((envelope) => !envelope.archived)
+        .sort((a, b) =>
+          a.sort_order === b.sort_order ? a.name.localeCompare(b.name) : a.sort_order - b.sort_order,
+        ),
+    [envelopes],
+  )
+  const groupedEnvelopeOptions = useMemo<GroupedEnvelopeOptions>(() => {
+    const activeGroups = envelopeGroups
+      .filter((group) => !group.archived)
+      .sort((a, b) => a.sort_order - b.sort_order)
+    const grouped: GroupedEnvelopeOptions = activeGroups.map((group) => ({
+      groupLabel: group.name,
+      envelopes: orderedActiveEnvelopes.filter((envelope) => envelope.group_id === group.id),
+    }))
+    const ungrouped = orderedActiveEnvelopes.filter((envelope) => !envelope.group_id)
+    if (ungrouped.length > 0) {
+      grouped.push({ groupLabel: 'Ungrouped', envelopes: ungrouped })
+    }
+    return grouped.filter((group) => group.envelopes.length > 0)
+  }, [envelopeGroups, orderedActiveEnvelopes])
   const selectableSourceRows = useMemo(
     () =>
       paycheckSources.filter(
@@ -625,13 +706,16 @@ export function JournalPage() {
   async function loadRangeReport() {
     setReportLoading(true)
     setError(null)
+    setReportExtraOverExpectedCents(0)
     try {
       const supabase = getSupabase()
       const moveTs = envelopeMovesCreatedAtFilter(reportFromDate, reportToDate)
       const [paychecksResp, movesResp, transactionsResp, overspentResp] = await Promise.all([
         supabase
           .from('paychecks')
-          .select('id,date,source,net_amount_cents')
+          .select(
+            'id,date,source,net_amount_cents,source_id,paycheck_sources:source_id(expected_amount_cents)',
+          )
           .gte('date', reportFromDate)
           .lte('date', reportToDate)
           .order('date', { ascending: false }),
@@ -662,6 +746,7 @@ export function JournalPage() {
       if (overspentResp.error) throw overspentResp.error
 
       const paycheckRows = paychecksResp.data ?? []
+      setReportExtraOverExpectedCents(sumPaycheckExtraOverExpectedCents(paycheckRows as PaycheckReportRowForExtra[]))
       const paycheckIds = paycheckRows.map((row) => row.id)
       let allocationMap = new Map<
         string,
@@ -780,6 +865,7 @@ export function JournalPage() {
         (overspentResp.data ?? []) as Array<{ name: string; balance_cents: number }>,
       )
     } catch (err) {
+      setReportExtraOverExpectedCents(0)
       setError(err instanceof Error ? err.message : 'Could not load range report.')
     } finally {
       setReportLoading(false)
@@ -843,12 +929,14 @@ export function JournalPage() {
       const remainingHeadroom = Math.max(cap - projectedBalance, 0)
       const progress = cap > 0 ? Math.max(0, Math.min(100, Math.round((projectedBalance / cap) * 100))) : 0
       const overCap = projectedBalance > cap
+      const status: 'under' | 'met' | 'over' =
+        projectedBalance > cap ? 'over' : projectedBalance === cap ? 'met' : 'under'
       return {
         text: overCap
           ? `Refill cap: projected balance ${formatCurrencyFromCents(projectedBalance)} is above ${formatCurrencyFromCents(cap)}.`
           : `Refill cap: projected balance ${formatCurrencyFromCents(projectedBalance)} / ${formatCurrencyFromCents(cap)} (${formatCurrencyFromCents(remainingHeadroom)} headroom).`,
         progress,
-        warning: overCap,
+        status,
       }
     }
 
@@ -858,13 +946,17 @@ export function JournalPage() {
 
     const remaining = Math.max(target - effectiveAssignedForMonth, 0)
     const progress = Math.max(0, Math.min(100, Math.round((effectiveAssignedForMonth / target) * 100)))
-    const warning = effectiveAssignedForMonth >= target
+    const status: 'under' | 'met' | 'over' =
+      effectiveAssignedForMonth > target ? 'over' : effectiveAssignedForMonth === target ? 'met' : 'under'
     return {
-      text: warning
-        ? `Monthly target: assigned ${formatCurrencyFromCents(effectiveAssignedForMonth)} / ${formatCurrencyFromCents(target)} this month.`
-        : `Monthly target: ${formatCurrencyFromCents(effectiveAssignedForMonth)} / ${formatCurrencyFromCents(target)} (${formatCurrencyFromCents(remaining)} to go)`,
+      text:
+        status === 'over'
+          ? `Monthly target exceeded: assigned ${formatCurrencyFromCents(effectiveAssignedForMonth)} / ${formatCurrencyFromCents(target)} this month.`
+          : status === 'met'
+            ? `Monthly target met: assigned ${formatCurrencyFromCents(effectiveAssignedForMonth)} / ${formatCurrencyFromCents(target)} this month.`
+            : `Monthly target: ${formatCurrencyFromCents(effectiveAssignedForMonth)} / ${formatCurrencyFromCents(target)} (${formatCurrencyFromCents(remaining)} to go)`,
       progress,
-      warning,
+      status,
     }
   }
 
@@ -914,6 +1006,7 @@ export function JournalPage() {
               inputMode="decimal"
               value={newSourceExpectedDollars}
               onChange={(e) => setNewSourceExpectedDollars(e.target.value)}
+              onBlur={(e) => setNewSourceExpectedDollars(normalizeDollarsInput(e.target.value))}
               placeholder="0.00"
               disabled={sourceMutationBusy}
               className="min-h-10 w-full rounded-lg border border-zinc-300 bg-white px-2.5 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
@@ -1038,6 +1131,7 @@ export function JournalPage() {
                 inputMode="decimal"
                 value={netDollars}
                 onChange={(e) => setNetDollars(e.target.value)}
+                onBlur={(e) => setNetDollars(normalizeDollarsInput(e.target.value))}
                 placeholder="0.00"
                 required
                 className="min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
@@ -1135,10 +1229,15 @@ export function JournalPage() {
                         className="mt-1 min-h-10 w-full rounded-lg border border-zinc-300 bg-white px-2.5 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
                       >
                         <option value="">Select…</option>
-                        {envelopes.map((env) => (
-                          <option key={env.id} value={env.id}>
-                            {formatEnvelopeDropdownLabel(env.name, env.balance_cents)}
-                          </option>
+                        {groupedEnvelopeOptions.map((group) => (
+                          <optgroup key={group.groupLabel} label={group.groupLabel}>
+                            {group.envelopes.map((env) => (
+                              <option key={env.id} value={env.id}>
+                                {formatEnvelopeDropdownLabel(env.name, env.balance_cents)}
+                                {env.due_day_of_month != null ? ` · ${formatDueDayPhrase(env.due_day_of_month)}` : ''}
+                              </option>
+                            ))}
+                          </optgroup>
                         ))}
                       </select>
                     </label>
@@ -1170,6 +1269,15 @@ export function JournalPage() {
                             ),
                           )
                         }
+                        onBlur={(e) =>
+                          setAllocations((prev) =>
+                            prev.map((item, itemIdx) =>
+                              itemIdx === idx
+                                ? { ...item, amountDollars: normalizeDollarsInput(e.target.value) }
+                                : item,
+                            ),
+                          )
+                        }
                         placeholder="0.00"
                         className="mt-1 min-h-10 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950 lg:w-28"
                       />
@@ -1186,6 +1294,7 @@ export function JournalPage() {
                     {envelope && (
                       <p className="text-[11px] text-zinc-500 dark:text-zinc-400 sm:col-span-2 lg:col-span-4">
                         Current balance: {formatCurrencyFromCents(envelope.balance_cents)}
+                        {envelope.due_day_of_month != null ? ` • ${formatDueDayPhrase(envelope.due_day_of_month)}` : ''}
                       </p>
                     )}
                     {projection && (
@@ -1193,9 +1302,11 @@ export function JournalPage() {
                         <p
                           className={[
                             'text-[11px]',
-                            projection.warning
-                              ? 'text-amber-700 dark:text-amber-300'
-                              : 'text-zinc-500 dark:text-zinc-400',
+                            projection.status === 'over'
+                              ? 'text-rose-700 dark:text-rose-300'
+                              : projection.status === 'met'
+                                ? 'text-emerald-700 dark:text-emerald-300'
+                                : 'text-zinc-500 dark:text-zinc-400',
                           ].join(' ')}
                         >
                           {projection.text}
@@ -1204,7 +1315,11 @@ export function JournalPage() {
                           <div
                             className={[
                               'h-full rounded-full',
-                              projection.warning ? 'bg-amber-500' : 'bg-emerald-500',
+                              projection.status === 'over'
+                                ? 'bg-rose-500'
+                                : projection.status === 'met'
+                                  ? 'bg-emerald-500'
+                                  : 'bg-amber-500',
                             ].join(' ')}
                             style={{ width: `${projection.progress}%` }}
                           />
@@ -1377,7 +1492,7 @@ export function JournalPage() {
               selectedAllocations.map((allocation, allocIdx) => (
                 <p key={`${allocation.envelope_id}-${allocIdx}-${allocation.allocation_month}`}>
                   • {allocation.envelope?.name ?? 'Envelope'} → {formatCurrencyFromCents(allocation.amount_cents)} (
-                  {format(new Date(allocation.allocation_month), 'MMM yyyy')})
+                  {format(parseIsoDateLocal(allocation.allocation_month), 'MMM yyyy')})
                 </p>
               ))
             )}
@@ -1461,7 +1576,7 @@ export function JournalPage() {
         </div>
 
         {(reportItems.length > 0 || reportSpendingByCategory.length > 0) && (
-          <div className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
+          <div className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-5">
             <div className="rounded-xl border border-zinc-200 p-3 dark:border-zinc-800">
               <p className="text-xs text-zinc-500 dark:text-zinc-400">Total spending</p>
               <p className="text-sm font-semibold text-red-700 dark:text-red-300">
@@ -1472,6 +1587,15 @@ export function JournalPage() {
               <p className="text-xs text-zinc-500 dark:text-zinc-400">Paychecks in range</p>
               <p className="text-sm font-semibold">
                 {reportItems.filter((item) => item.type === 'paycheck').length}
+              </p>
+            </div>
+            <div className="rounded-xl border border-zinc-200 p-3 dark:border-zinc-800">
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">Extra above expected</p>
+              <p className="text-sm font-semibold text-emerald-700 dark:text-emerald-300">
+                +{formatCurrencyFromCents(reportExtraOverExpectedCents)}
+              </p>
+              <p className="mt-0.5 text-[11px] text-zinc-500 dark:text-zinc-400">
+                Linked paychecks only (net over saved source baseline)
               </p>
             </div>
             <div className="rounded-xl border border-zinc-200 p-3 dark:border-zinc-800">
@@ -1577,7 +1701,7 @@ export function JournalPage() {
                     {item.allocations.map((allocation) => (
                       <p key={`${item.id}-${allocation.envelopeName}-${allocation.allocationMonth}`}>
                         • {allocation.envelopeName}: {formatCurrencyFromCents(allocation.amount_cents)} (
-                        {format(new Date(allocation.allocationMonth), 'MMM yyyy')})
+                        {format(parseIsoDateLocal(allocation.allocationMonth), 'MMM yyyy')})
                       </p>
                     ))}
                   </div>

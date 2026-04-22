@@ -5,8 +5,9 @@ import {
   formatAccountDropdownLabel,
   formatCurrencyFromCents,
   formatEnvelopeDropdownLabel,
+  normalizeDollarsInput,
 } from '../lib/currency'
-import { addMonths, endOfMonth, format, max, min, startOfMonth, subDays, subMonths } from 'date-fns'
+import { addMonths, endOfMonth, format, startOfMonth, subDays, subMonths } from 'date-fns'
 import { CollapsibleCard } from '../components/ui/CollapsibleCard'
 import {
   isBillPaidForMonth,
@@ -98,6 +99,34 @@ type SubscriptionForm = {
 type DatePreset = 'all_time' | 'this_month' | 'last_30' | 'last_90' | 'custom'
 
 const DEFAULT_GROUP_LABEL = 'Ungrouped'
+const ENVELOPE_COLOR_PALETTE = [
+  '#10b981',
+  '#22c55e',
+  '#14b8a6',
+  '#06b6d4',
+  '#3b82f6',
+  '#6366f1',
+  '#8b5cf6',
+  '#a855f7',
+  '#ec4899',
+  '#f43f5e',
+  '#ef4444',
+  '#f97316',
+  '#f59e0b',
+  '#eab308',
+  '#84cc16',
+  '#64748b',
+]
+
+function monthKeyToLocalDate(monthKey: string): Date {
+  const [yearRaw, monthRaw] = monthKey.split('-')
+  const year = Number.parseInt(yearRaw ?? '', 10)
+  const month = Number.parseInt(monthRaw ?? '', 10)
+  if (!Number.isFinite(year) || !Number.isFinite(month) || month < 1 || month > 12) {
+    return new Date()
+  }
+  return new Date(year, month - 1, 1)
+}
 
 const DEFAULT_FORM: EnvelopeForm = {
   name: '',
@@ -152,6 +181,9 @@ export function EnvelopesPage() {
   const [billPaidSavingId, setBillPaidSavingId] = useState<string | null>(null)
   const [monthlyAssignedByEnvelope, setMonthlyAssignedByEnvelope] = useState<Record<string, number>>({})
   const [assignmentMatrix, setAssignmentMatrix] = useState<Record<string, number>>({})
+  const [futureAssignedAfterViewByEnvelope, setFutureAssignedAfterViewByEnvelope] = useState<Record<string, number>>(
+    {},
+  )
   const [assignmentWindowStart, setAssignmentWindowStart] = useState(() =>
     startOfMonth(subMonths(new Date(), 5)),
   )
@@ -178,12 +210,6 @@ export function EnvelopesPage() {
       }
       const assignStart = startOfMonth(assignmentWindowStart)
       const assignEnd = endOfMonth(addMonths(assignStart, 5))
-      const viewStart = startOfMonth(activeEnvelopesViewMonth)
-      const viewEnd = endOfMonth(activeEnvelopesViewMonth)
-      const spanStart = min([assignStart, viewStart])
-      const spanEnd = max([assignEnd, viewEnd])
-      const monthStart = format(startOfMonth(subMonths(spanStart, 1)), 'yyyy-MM-dd')
-      const monthEnd = format(endOfMonth(addMonths(spanEnd, 1)), 'yyyy-MM-dd')
       const [groupsResp, envelopesResp, movesResp, monthAllocationsResp, accountsResp] = await Promise.all([
         supabase.from('envelope_groups').select('id,name,sort_order,archived').order('sort_order', { ascending: true }),
         supabase
@@ -202,8 +228,7 @@ export function EnvelopesPage() {
         supabase
           .from('paycheck_allocations')
           .select('envelope_id,amount_cents,allocation_month')
-          .gte('allocation_month', monthStart)
-          .lte('allocation_month', monthEnd),
+          .order('allocation_month', { ascending: true }),
         supabase
           .from('financial_accounts')
           .select('id,name,account_type,balance_cents')
@@ -228,7 +253,10 @@ export function EnvelopesPage() {
       setAccounts((accountsResp.data ?? []) as FinancialAccount[])
       const byEnvelope: Record<string, number> = {}
       const matrix: Record<string, number> = {}
+      const futureByEnvelope: Record<string, number> = {}
       const viewMonthKey = format(activeEnvelopesViewMonth, 'yyyy-MM')
+      const assignWindowStartMonth = format(assignStart, 'yyyy-MM')
+      const assignWindowEndMonth = format(assignEnd, 'yyyy-MM')
       for (const row of (monthAllocationsResp.data ?? []) as Array<{
         envelope_id: string
         amount_cents: number
@@ -236,14 +264,20 @@ export function EnvelopesPage() {
       }>) {
         const month = row.allocation_month?.slice(0, 7)
         if (!month) continue
-        const key = `${row.envelope_id}|${month}`
-        matrix[key] = (matrix[key] ?? 0) + row.amount_cents
+        if (month >= assignWindowStartMonth && month <= assignWindowEndMonth) {
+          const key = `${row.envelope_id}|${month}`
+          matrix[key] = (matrix[key] ?? 0) + row.amount_cents
+        }
         if (month === viewMonthKey) {
           byEnvelope[row.envelope_id] = (byEnvelope[row.envelope_id] ?? 0) + row.amount_cents
+        }
+        if (month > viewMonthKey) {
+          futureByEnvelope[row.envelope_id] = (futureByEnvelope[row.envelope_id] ?? 0) + row.amount_cents
         }
       }
       setMonthlyAssignedByEnvelope(byEnvelope)
       setAssignmentMatrix(matrix)
+      setFutureAssignedAfterViewByEnvelope(futureByEnvelope)
       setGroupRename(
         Object.fromEntries((groupsResp.data ?? []).map((group) => [group.id, group.name])),
       )
@@ -852,8 +886,8 @@ export function EnvelopesPage() {
           </div>
         </div>
         <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
-          Showing {format(new Date(`${assignmentMonths[0]}-01`), 'MMM yyyy')} through{' '}
-          {format(new Date(`${assignmentMonths[assignmentMonths.length - 1]}-01`), 'MMM yyyy')}.
+          Showing {format(monthKeyToLocalDate(assignmentMonths[0]), 'MMM yyyy')} through{' '}
+          {format(monthKeyToLocalDate(assignmentMonths[assignmentMonths.length - 1]), 'MMM yyyy')}.
         </p>
         {activeEnvelopes.length === 0 ? (
           <p className="mt-3 text-sm text-zinc-500 dark:text-zinc-400">No envelopes yet.</p>
@@ -865,7 +899,7 @@ export function EnvelopesPage() {
                   <th className="px-2 py-1">Envelope</th>
                   {assignmentMonths.map((month) => (
                     <th key={month} className="px-2 py-1">
-                      {format(new Date(`${month}-01`), 'MMM yyyy')}
+                      {format(monthKeyToLocalDate(month), 'MMM yyyy')}
                     </th>
                   ))}
                 </tr>
@@ -1009,6 +1043,9 @@ export function EnvelopesPage() {
               inputMode="decimal"
               value={form.targetDollars}
               onChange={(event) => setForm((prev) => ({ ...prev, targetDollars: event.target.value }))}
+              onBlur={(event) =>
+                setForm((prev) => ({ ...prev, targetDollars: normalizeDollarsInput(event.target.value) }))
+              }
               placeholder="0.00"
               className="min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
             />
@@ -1020,12 +1057,28 @@ export function EnvelopesPage() {
           </label>
           <label className="text-sm">
             <span className="mb-1 block text-zinc-700 dark:text-zinc-300">Color</span>
-            <input
-              type="color"
-              value={form.color}
-              onChange={(event) => setForm((prev) => ({ ...prev, color: event.target.value }))}
-              className="min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-2 py-2 dark:border-zinc-700 dark:bg-zinc-950"
-            />
+            <div className="flex flex-wrap gap-2 rounded-lg border border-zinc-300 bg-white p-2 dark:border-zinc-700 dark:bg-zinc-950">
+              {ENVELOPE_COLOR_PALETTE.map((color) => {
+                const isSelected = form.color.toLowerCase() === color.toLowerCase()
+                return (
+                  <button
+                    key={color}
+                    type="button"
+                    onClick={() => setForm((prev) => ({ ...prev, color }))}
+                    className={[
+                      'h-7 w-7 rounded-full border transition',
+                      isSelected
+                        ? 'border-zinc-900 ring-2 ring-offset-1 ring-zinc-400 dark:border-zinc-100 dark:ring-zinc-500'
+                        : 'border-zinc-300 dark:border-zinc-700',
+                    ].join(' ')}
+                    style={{ backgroundColor: color }}
+                    title={color}
+                    aria-label={`Select envelope color ${color}`}
+                  />
+                )
+              })}
+            </div>
+            <p className="mt-1 text-[11px] text-zinc-500 dark:text-zinc-400">Selected color: {form.color}</p>
           </label>
           <label className="text-sm">
             <span className="mb-1 block text-zinc-700 dark:text-zinc-300">Group</span>
@@ -1201,6 +1254,12 @@ export function EnvelopesPage() {
               inputMode="decimal"
               value={subscriptionForm.amountDollars}
               onChange={(event) => setSubscriptionForm((prev) => ({ ...prev, amountDollars: event.target.value }))}
+              onBlur={(event) =>
+                setSubscriptionForm((prev) => ({
+                  ...prev,
+                  amountDollars: normalizeDollarsInput(event.target.value),
+                }))
+              }
               className="min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
               placeholder="0.00"
             />
@@ -1436,7 +1495,18 @@ export function EnvelopesPage() {
                           )}
                         </div>
                       </div>
-                      <div className="text-sm font-semibold">{formatCurrencyFromCents(envelope.balance_cents)}</div>
+                      <div className="text-right">
+                        <div className="text-sm font-semibold">
+                          {formatCurrencyFromCents(
+                            envelope.balance_cents - (futureAssignedAfterViewByEnvelope[envelope.id] ?? 0),
+                          )}
+                        </div>
+                        {(futureAssignedAfterViewByEnvelope[envelope.id] ?? 0) > 0 && (
+                          <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                            {format(activeEnvelopesViewMonth, 'MMMM')} availability
+                          </p>
+                        )}
+                      </div>
                       <div className="flex gap-2">
                         <button type="button" onClick={() => beginEdit(envelope)} className="btn-secondary px-3 text-xs">
                           Edit
@@ -1584,6 +1654,12 @@ export function EnvelopesPage() {
                   inputMode="decimal"
                   value={moveForm.amountDollars}
                   onChange={(event) => setMoveForm((prev) => ({ ...prev, amountDollars: event.target.value }))}
+                  onBlur={(event) =>
+                    setMoveForm((prev) => ({
+                      ...prev,
+                      amountDollars: normalizeDollarsInput(event.target.value),
+                    }))
+                  }
                   placeholder="0.00"
                   className="min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
                 />

@@ -6,6 +6,7 @@ import {
   formatAccountDropdownLabel,
   formatCurrencyFromCents,
   formatEnvelopeDropdownLabel,
+  normalizeDollarsInput,
 } from '../lib/currency'
 import { renameDebtEnvelopeIfPresent, syncDebtEnvelopeMonthlyGoalFromMinimum } from '../lib/debtEnvelopeSync'
 import { getSupabase } from '../lib/supabase'
@@ -705,6 +706,7 @@ export function AccountsPage() {
             inputMode="decimal"
             value={newAccountStartingBalance}
             onChange={(event) => setNewAccountStartingBalance(event.target.value)}
+            onBlur={(event) => setNewAccountStartingBalance(normalizeDollarsInput(event.target.value))}
             placeholder="Starting balance (e.g. 2500.00)"
             className="min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950 sm:w-72"
           />
@@ -726,6 +728,7 @@ export function AccountsPage() {
                 inputMode="decimal"
                 value={newAccountAprPercent}
                 onChange={(event) => setNewAccountAprPercent(event.target.value)}
+                onBlur={(event) => setNewAccountAprPercent(normalizeDollarsInput(event.target.value))}
                 placeholder="e.g. 24.99"
                 className="mt-1 min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950 sm:max-w-xs"
               />
@@ -737,6 +740,7 @@ export function AccountsPage() {
                 inputMode="decimal"
                 value={newAccountMinimumPayment}
                 onChange={(event) => setNewAccountMinimumPayment(event.target.value)}
+                onBlur={(event) => setNewAccountMinimumPayment(normalizeDollarsInput(event.target.value))}
                 placeholder="Optional — also sets debt envelope goal"
                 className="mt-1 min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950 sm:max-w-xs"
               />
@@ -816,6 +820,12 @@ export function AccountsPage() {
                           [account.id]: event.target.value,
                         }))
                       }
+                      onBlur={(event) =>
+                        setBalanceDrafts((prev) => ({
+                          ...prev,
+                          [account.id]: normalizeDollarsInput(event.target.value),
+                        }))
+                      }
                       className="mt-1 min-h-10 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
                     />
                   </div>
@@ -831,6 +841,12 @@ export function AccountsPage() {
                             setAprDrafts((prev) => ({
                               ...prev,
                               [account.id]: event.target.value,
+                            }))
+                          }
+                          onBlur={(event) =>
+                            setAprDrafts((prev) => ({
+                              ...prev,
+                              [account.id]: normalizeDollarsInput(event.target.value),
                             }))
                           }
                           placeholder="e.g. 24.99"
@@ -851,6 +867,12 @@ export function AccountsPage() {
                               [account.id]: event.target.value,
                             }))
                           }
+                          onBlur={(event) =>
+                            setMinimumDrafts((prev) => ({
+                              ...prev,
+                              [account.id]: normalizeDollarsInput(event.target.value),
+                            }))
+                          }
                           placeholder="0.00"
                           className="mt-1 min-h-10 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
                         />
@@ -865,6 +887,12 @@ export function AccountsPage() {
                             setPlannedDrafts((prev) => ({
                               ...prev,
                               [account.id]: event.target.value,
+                            }))
+                          }
+                          onBlur={(event) =>
+                            setPlannedDrafts((prev) => ({
+                              ...prev,
+                              [account.id]: normalizeDollarsInput(event.target.value),
                             }))
                           }
                           placeholder="Optional"
@@ -964,6 +992,7 @@ export function AccountsPage() {
               inputMode="decimal"
               value={transferAmountDollars}
               onChange={(event) => setTransferAmountDollars(event.target.value)}
+              onBlur={(event) => setTransferAmountDollars(normalizeDollarsInput(event.target.value))}
               placeholder="0.00"
               className="min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
             />
@@ -1058,6 +1087,7 @@ export function AccountsPage() {
               inputMode="decimal"
               value={internalXferAmountDollars}
               onChange={(event) => setInternalXferAmountDollars(event.target.value)}
+              onBlur={(event) => setInternalXferAmountDollars(normalizeDollarsInput(event.target.value))}
               placeholder="0.00"
               className="min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
             />

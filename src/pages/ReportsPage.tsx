@@ -38,6 +38,27 @@ type PaycheckRow = {
   date: string
   source: string
   net_amount_cents: number
+  source_id?: string | null
+  paycheck_sources?: { expected_amount_cents: number } | { expected_amount_cents: number }[] | null
+}
+
+function linkedPaycheckSourceExpected(
+  rel: PaycheckRow['paycheck_sources'],
+): number | null {
+  if (!rel) return null
+  const row = Array.isArray(rel) ? rel[0] : rel
+  if (!row || typeof row.expected_amount_cents !== 'number') return null
+  return row.expected_amount_cents
+}
+
+function sumPaycheckExtraOverExpectedCents(pcs: PaycheckRow[]): number {
+  let sum = 0
+  for (const p of pcs) {
+    const expected = linkedPaycheckSourceExpected(p.paycheck_sources)
+    if (expected == null) continue
+    if (p.net_amount_cents > expected) sum += p.net_amount_cents - expected
+  }
+  return sum
 }
 
 type EnvelopeMoveDetail = {
@@ -234,6 +255,7 @@ type KpiPack = {
   outEnvelope: number
   inEnvelope: number
   paycheckTotal: number
+  paycheckExtraOverExpectedCents: number
   moveVolume: number
   moveCount: number
   funded: number
@@ -259,6 +281,7 @@ function buildKpis(
     byKind.set(k, (byKind.get(k) ?? 0) + tx.amount_cents)
   }
   const paycheckTotal = pcs.reduce((s, p) => s + p.net_amount_cents, 0)
+  const paycheckExtraOverExpectedCents = sumPaycheckExtraOverExpectedCents(pcs)
   const moveVolume = moves.reduce((s, m) => s + Math.abs(m.amount_cents), 0)
   const funded = allocs.reduce((s, a) => s + a.amount_cents, 0)
   const paymentTotal = txs
@@ -268,6 +291,7 @@ function buildKpis(
     outEnvelope,
     inEnvelope,
     paycheckTotal,
+    paycheckExtraOverExpectedCents,
     moveVolume,
     moveCount: moves.length,
     funded,
@@ -372,7 +396,9 @@ export function ReportsPage() {
           .limit(10_000),
         supabase
           .from('paychecks')
-          .select('id,date,source,net_amount_cents')
+          .select(
+            'id,date,source,net_amount_cents,source_id,paycheck_sources:source_id(expected_amount_cents)',
+          )
           .gte('date', fromDate)
           .lte('date', toDate)
           .order('date', { ascending: false })
@@ -495,7 +521,9 @@ export function ReportsPage() {
             .limit(10_000),
           supabase
             .from('paychecks')
-            .select('id,date,source,net_amount_cents')
+            .select(
+              'id,date,source,net_amount_cents,source_id,paycheck_sources:source_id(expected_amount_cents)',
+            )
             .gte('date', cf)
             .lte('date', ct)
             .order('date', { ascending: false })
@@ -776,6 +804,10 @@ export function ReportsPage() {
   function handleDownloadPdf() {
     const summaryLines = [
       { label: 'Paychecks (net in range)', value: formatCurrencyFromCents(kpis.paycheckTotal) },
+      {
+        label: 'Extra above expected (linked paychecks)',
+        value: formatCurrencyFromCents(kpis.paycheckExtraOverExpectedCents),
+      },
       { label: 'Envelope outflows', value: `-${formatCurrencyFromCents(kpis.outEnvelope)}` },
       { label: 'Credits to envelopes', value: `+${formatCurrencyFromCents(kpis.inEnvelope)}` },
       { label: 'Net (paychecks - out + credits)', value: formatCurrencyFromCents(kpis.netAfterPaychecks) },
@@ -989,8 +1021,13 @@ export function ReportsPage() {
         {loading && transactions.length === 0 ? (
           <p className="text-sm text-zinc-500 dark:text-zinc-400">Loading…</p>
         ) : (
-          <div className="mt-1 grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
+          <div className="mt-1 grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-5">
             <Kpi label="Paychecks (net in range)" value={formatCurrencyFromCents(kpis.paycheckTotal)} sub={`${paychecks.length} deposits`} />
+            <Kpi
+              label="Extra above expected"
+              value={`+${formatCurrencyFromCents(kpis.paycheckExtraOverExpectedCents)}`}
+              sub="Paychecks linked to a saved source: net over that source’s expected amount"
+            />
             <Kpi
               label="Envelope outflows"
               value={`-${formatCurrencyFromCents(kpis.outEnvelope)}`}
@@ -1033,6 +1070,7 @@ export function ReportsPage() {
                 {(
                   [
                     ['Paychecks (net)', 'paycheckTotal', true],
+                    ['Extra above expected (paychecks)', 'paycheckExtraOverExpectedCents', true],
                     ['Envelope outflows', 'outEnvelope', true],
                     ['Credits to envelopes', 'inEnvelope', true],
                     ['Net (paychecks − out + credits)', 'netAfterPaychecks', true],

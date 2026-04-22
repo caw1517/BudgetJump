@@ -114,6 +114,7 @@ export function TransactionsPage() {
   const [envelopeGroups, setEnvelopeGroups] = useState<EnvelopeGroup[]>([])
   const [accounts, setAccounts] = useState<FinancialAccount[]>([])
   const [transactions, setTransactions] = useState<TransactionRow[]>([])
+  const [archivedTransactions, setArchivedTransactions] = useState<TransactionRow[]>([])
   const [form, setForm] = useState<TransactionForm>(DEFAULT_FORM)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -140,7 +141,7 @@ export function TransactionsPage() {
     setError(null)
     try {
       const supabase = getSupabase()
-      const [groupsResp, envelopesResp, accountsResp, transactionsResp] = await Promise.all([
+      const [groupsResp, envelopesResp, accountsResp, transactionsResp, archivedTransactionsResp] = await Promise.all([
         supabase
           .from('envelope_groups')
           .select('id,name,sort_order,archived')
@@ -163,16 +164,24 @@ export function TransactionsPage() {
           .eq('archived', false)
           .order('date', { ascending: false })
           .order('created_at', { ascending: false }),
+        supabase
+          .from('transactions')
+          .select('id,date,payee,amount_cents,envelope_id,note,cleared,import_source,transaction_kind,archived,account_id,account:account_id(name),envelope:envelope_id(name)')
+          .eq('archived', true)
+          .order('date', { ascending: false })
+          .order('created_at', { ascending: false }),
       ])
       if (groupsResp.error) throw groupsResp.error
       if (envelopesResp.error) throw envelopesResp.error
       if (accountsResp.error) throw accountsResp.error
       if (transactionsResp.error) throw transactionsResp.error
+      if (archivedTransactionsResp.error) throw archivedTransactionsResp.error
 
       setEnvelopeGroups((groupsResp.data ?? []) as EnvelopeGroup[])
       setEnvelopes(envelopesResp.data ?? [])
       setAccounts(accountsResp.data ?? [])
       setTransactions((transactionsResp.data ?? []) as unknown as TransactionRow[])
+      setArchivedTransactions((archivedTransactionsResp.data ?? []) as unknown as TransactionRow[])
       setForm((prev) => ({
         ...prev,
         direction: prev.direction ?? 'outflow',
@@ -314,6 +323,16 @@ export function TransactionsPage() {
       envelopeRows,
     }
   }, [splitMode, editingId, form.accountId, form.direction, form.transactionKind, splitLines, accountById, envelopeById])
+  const splitAssignment = useMemo(() => {
+    if (!splitMode || editingId) return null
+    const targetCents = dollarsStringToCents(form.amountDollars)
+    const assignedCents = splitLines.reduce((sum, line) => {
+      const lineCents = dollarsStringToCents(line.amountDollars)
+      return lineCents != null && lineCents > 0 ? sum + lineCents : sum
+    }, 0)
+    const remainingCents = targetCents == null ? null : targetCents - assignedCents
+    return { targetCents, assignedCents, remainingCents }
+  }, [splitMode, editingId, form.amountDollars, splitLines])
 
   const allFilteredSelected =
     filteredTransactions.length > 0 &&
@@ -489,6 +508,22 @@ export function TransactionsPage() {
       await loadData()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not archive transaction.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function restoreTransaction(id: string) {
+    setSaving(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const { error: restoreError } = await getSupabase().rpc('unarchive_transaction', { p_transaction_id: id })
+      if (restoreError) throw restoreError
+      setNotice('Transaction restored.')
+      await loadData()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not restore transaction.')
     } finally {
       setSaving(false)
     }
@@ -1285,6 +1320,33 @@ export function TransactionsPage() {
                   Add line
                 </button>
               </div>
+              {splitAssignment && (
+                <p className="mb-2 text-xs text-zinc-600 dark:text-zinc-300">
+                  Assigned:{' '}
+                  <span className="font-medium">{formatCurrencyFromCents(splitAssignment.assignedCents)}</span>
+                  {splitAssignment.targetCents != null && splitAssignment.remainingCents != null && (
+                    <>
+                      {' '}of{' '}
+                      <span className="font-medium">{formatCurrencyFromCents(splitAssignment.targetCents)}</span>
+                      {' '}· Remaining:{' '}
+                      <span
+                        className={[
+                          'font-medium',
+                          splitAssignment.remainingCents === 0
+                            ? 'text-emerald-700 dark:text-emerald-300'
+                            : splitAssignment.remainingCents > 0
+                              ? 'text-amber-700 dark:text-amber-300'
+                              : 'text-red-700 dark:text-red-300',
+                        ].join(' ')}
+                      >
+                        {splitAssignment.remainingCents >= 0
+                          ? formatCurrencyFromCents(splitAssignment.remainingCents)
+                          : `Over by ${formatCurrencyFromCents(Math.abs(splitAssignment.remainingCents))}`}
+                      </span>
+                    </>
+                  )}
+                </p>
+              )}
               <div className="space-y-2">
                 {splitLines.map((line, idx) => (
                   <div key={line.id} className="grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,1fr)_10rem_auto] sm:items-end">
@@ -1684,6 +1746,65 @@ export function TransactionsPage() {
                     type="button"
                     onClick={() => void deleteTransactionPermanently(transaction.id)}
                     className="min-h-9 rounded-lg border border-red-600 px-3 text-xs font-medium text-red-700 hover:bg-red-50 dark:border-red-500 dark:text-red-300 dark:hover:bg-red-950/40"
+                  >
+                    Delete
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </CollapsibleCard>
+
+      <CollapsibleCard title="Archived Transactions" storageKey="transactions-archived" defaultCollapsed>
+        <p className="text-xs text-zinc-500 dark:text-zinc-400">
+          Archived transactions are excluded from reports and active balances until restored.
+        </p>
+        {archivedTransactions.length === 0 ? (
+          <p className="mt-3 text-sm text-zinc-500 dark:text-zinc-400">No archived transactions.</p>
+        ) : (
+          <div className="mt-3 space-y-2">
+            {archivedTransactions.map((transaction) => (
+              <div
+                key={transaction.id}
+                className="flex flex-col gap-2 rounded-xl border border-zinc-200 p-3.5 dark:border-zinc-800 sm:flex-row sm:items-center sm:justify-between"
+              >
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-medium">{transaction.payee}</p>
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                    {format(new Date(transaction.date), 'MMM d, yyyy')} •{' '}
+                    {transaction.envelope?.name ?? (transaction.envelope_id == null ? 'Account only' : 'Unknown envelope')}
+                    {' • '}
+                    {transaction.cleared ? 'Cleared' : 'Pending'}
+                  </p>
+                  {transaction.account?.name && (
+                    <p className="text-xs text-zinc-500 dark:text-zinc-400">Account: {transaction.account.name}</p>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  <p
+                    className={[
+                      'text-sm font-semibold',
+                      transaction.amount_cents < 0
+                        ? 'text-emerald-700 dark:text-emerald-300'
+                        : 'text-red-700 dark:text-red-300',
+                    ].join(' ')}
+                  >
+                    {formatSignedCurrency(transaction.amount_cents)}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => void restoreTransaction(transaction.id)}
+                    disabled={saving}
+                    className="btn-secondary px-3 text-xs"
+                  >
+                    Restore
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void deleteTransactionPermanently(transaction.id)}
+                    disabled={saving}
+                    className="min-h-9 rounded-lg border border-red-600 px-3 text-xs font-medium text-red-700 hover:bg-red-50 disabled:opacity-60 dark:border-red-500 dark:text-red-300 dark:hover:bg-red-950/40"
                   >
                     Delete
                   </button>

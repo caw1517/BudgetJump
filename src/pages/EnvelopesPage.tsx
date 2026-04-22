@@ -168,6 +168,9 @@ export function EnvelopesPage() {
   const [form, setForm] = useState<EnvelopeForm>(DEFAULT_FORM)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [moveOpen, setMoveOpen] = useState(false)
+  const [reconcileOpen, setReconcileOpen] = useState(false)
+  const [reconcileEnvelopeId, setReconcileEnvelopeId] = useState('')
+  const [reconcileDismissedForDeltaCents, setReconcileDismissedForDeltaCents] = useState<number | null>(null)
   const [moveForm, setMoveForm] = useState<MoveForm>(DEFAULT_MOVE_FORM)
   const [subscriptionForm, setSubscriptionForm] = useState<SubscriptionForm>(DEFAULT_SUBSCRIPTION_FORM)
   const [subscriptionEditingEnvelopeId, setSubscriptionEditingEnvelopeId] = useState<string | null>(null)
@@ -327,6 +330,16 @@ export function EnvelopesPage() {
     [envelopes],
   )
 
+  const cashAccountTotalCents = useMemo(
+    () => accounts.reduce((sum, account) => sum + account.balance_cents, 0),
+    [accounts],
+  )
+  const envelopeTotalCents = useMemo(
+    () => activeEnvelopes.reduce((sum, envelope) => sum + envelope.balance_cents, 0),
+    [activeEnvelopes],
+  )
+  const envelopeAccountDeltaCents = cashAccountTotalCents - envelopeTotalCents
+
   const subscriptionEnvelopes = useMemo(
     () => activeEnvelopes.filter((e) => e.is_subscription).sort((a, b) => a.name.localeCompare(b.name)),
     [activeEnvelopes],
@@ -340,6 +353,19 @@ export function EnvelopesPage() {
         daysUntilNextDue(a.due_day_of_month!, today) - daysUntilNextDue(b.due_day_of_month!, today),
     )
   }, [activeEnvelopes])
+
+  useEffect(() => {
+    if (loading) return
+    if (activeEnvelopes.length === 0) return
+    if (envelopeAccountDeltaCents === 0) {
+      setReconcileOpen(false)
+      setReconcileDismissedForDeltaCents(null)
+      return
+    }
+    if (reconcileDismissedForDeltaCents === envelopeAccountDeltaCents) return
+    setReconcileEnvelopeId((prev) => prev || activeEnvelopes[0]?.id || '')
+    setReconcileOpen(true)
+  }, [loading, activeEnvelopes, envelopeAccountDeltaCents, reconcileDismissedForDeltaCents])
 
   const reservedAfterMonthForEnvelope = useCallback(
     (envelopeId: string, monthKey: string): number => {
@@ -713,6 +739,36 @@ export function EnvelopesPage() {
       await loadData()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not move funds.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function applyEnvelopeTotalReconciliation() {
+    if (!reconcileEnvelopeId || envelopeAccountDeltaCents === 0) return
+    const envelope = activeEnvelopes.find((item) => item.id === reconcileEnvelopeId)
+    if (!envelope) {
+      setError('Choose an envelope to apply the reconciliation adjustment.')
+      return
+    }
+    setSaving(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const nextBalance = envelope.balance_cents + envelopeAccountDeltaCents
+      const { error: updateError } = await getSupabase()
+        .from('envelopes')
+        .update({ balance_cents: nextBalance })
+        .eq('id', reconcileEnvelopeId)
+      if (updateError) throw updateError
+      setNotice(
+        `Reconciled envelope totals by applying ${formatCurrencyFromCents(envelopeAccountDeltaCents)} to ${envelope.name}.`,
+      )
+      setReconcileOpen(false)
+      setReconcileDismissedForDeltaCents(null)
+      await loadData()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not reconcile envelope totals.')
     } finally {
       setSaving(false)
     }
@@ -1607,6 +1663,21 @@ export function EnvelopesPage() {
         )}
       </CollapsibleCard>
 
+      {envelopeAccountDeltaCents !== 0 && (
+        <section className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-100">
+          Envelope total ({formatCurrencyFromCents(envelopeTotalCents)}) does not match account cash total (
+          {formatCurrencyFromCents(cashAccountTotalCents)}). Difference:{' '}
+          <span className="font-semibold">{formatCurrencyFromCents(envelopeAccountDeltaCents)}</span>.
+          <button
+            type="button"
+            onClick={() => setReconcileOpen(true)}
+            className="ml-2 inline-flex min-h-8 items-center rounded-lg border border-amber-500 px-2.5 text-xs font-medium hover:bg-amber-100 dark:border-amber-700 dark:hover:bg-amber-900/40"
+          >
+            Reconcile now
+          </button>
+        </section>
+      )}
+
       <CollapsibleCard title="Recent Moves" storageKey="envelopes-recent-moves">
         <h2 className="text-base font-semibold">Recent Moves</h2>
         <div className="mt-3 flex gap-2 overflow-x-auto pb-1 [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
@@ -1776,6 +1847,67 @@ export function EnvelopesPage() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {reconcileOpen && envelopeAccountDeltaCents !== 0 && (
+        <div className="fixed inset-0 z-50 flex items-end bg-zinc-950/45 p-3 sm:items-center sm:justify-center">
+          <div className="w-full max-w-lg rounded-2xl border border-zinc-200 bg-white p-4 shadow-xl dark:border-zinc-800 dark:bg-zinc-900 sm:p-6">
+            <div className="mb-4 flex items-center justify-between gap-3">
+              <h3 className="text-base font-semibold">Reconcile envelope totals</h3>
+              <button
+                type="button"
+                onClick={() => {
+                  setReconcileOpen(false)
+                  setReconcileDismissedForDeltaCents(envelopeAccountDeltaCents)
+                }}
+                className="min-h-10 rounded-lg px-3 text-xs font-medium text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+              >
+                Close
+              </button>
+            </div>
+            <p className="text-sm text-zinc-700 dark:text-zinc-200">
+              Accounts total: <span className="font-semibold">{formatCurrencyFromCents(cashAccountTotalCents)}</span>
+              <br />
+              Envelopes total: <span className="font-semibold">{formatCurrencyFromCents(envelopeTotalCents)}</span>
+              <br />
+              Difference to apply: <span className="font-semibold">{formatCurrencyFromCents(envelopeAccountDeltaCents)}</span>
+            </p>
+            <label className="mt-4 block text-sm">
+              <span className="mb-1 block text-zinc-700 dark:text-zinc-300">Apply difference to envelope</span>
+              <select
+                value={reconcileEnvelopeId}
+                onChange={(event) => setReconcileEnvelopeId(event.target.value)}
+                className="min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
+              >
+                {activeEnvelopes.map((envelope) => (
+                  <option key={envelope.id} value={envelope.id}>
+                    {formatEnvelopeDropdownLabel(envelope.name, envelope.balance_cents)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="mt-4 flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => void applyEnvelopeTotalReconciliation()}
+                disabled={saving || !reconcileEnvelopeId}
+                className="min-h-11 rounded-lg bg-emerald-600 px-4 text-sm font-medium text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {saving ? 'Applying...' : 'Apply Reconciliation'}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setReconcileOpen(false)
+                  setReconcileDismissedForDeltaCents(envelopeAccountDeltaCents)
+                }}
+                className="min-h-11 rounded-lg border border-zinc-300 px-4 text-sm font-medium dark:border-zinc-700"
+              >
+                Dismiss for now
+              </button>
+            </div>
           </div>
         </div>
       )}

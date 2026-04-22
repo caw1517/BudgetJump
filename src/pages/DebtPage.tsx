@@ -15,6 +15,7 @@ import {
   simulateCombinedDebtPayoff,
   simulateDebtPayoff,
 } from '../lib/debtPayoff'
+import { parseCalendarDateLocal } from '../lib/localCalendarDate'
 import { getSupabase } from '../lib/supabase'
 
 type AccountType = 'checking' | 'savings' | 'credit_card' | 'debt' | 'cash' | 'other'
@@ -959,7 +960,7 @@ export function DebtPage() {
                   <div className="min-w-0">
                     <p className="font-medium text-zinc-900 dark:text-zinc-50">{tx.payee}</p>
                     <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                      {format(new Date(tx.date), 'MMM d, yyyy')} · {accName} · {txKindLabel(tx.transaction_kind)}
+                      {format(parseCalendarDateLocal(tx.date), 'MMM d, yyyy')} · {accName} · {txKindLabel(tx.transaction_kind)}
                     </p>
                   </div>
                   <p className="shrink-0 font-semibold tabular-nums">{formatCurrencyFromCents(tx.amount_cents)}</p>

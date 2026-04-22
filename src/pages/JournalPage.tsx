@@ -9,6 +9,7 @@ import {
   normalizeDollarsInput,
 } from '../lib/currency'
 import { formatDueDayPhrase } from '../lib/envelopeDueDates'
+import { parseCalendarDateLocal } from '../lib/localCalendarDate'
 import { getSupabase } from '../lib/supabase'
 
 function envelopeMovesCreatedAtFilter(fromDate: string, toDate: string): { gte: string; lt: string } {
@@ -19,15 +20,6 @@ function envelopeMovesCreatedAtFilter(fromDate: string, toDate: string): { gte: 
     gte: start.toISOString(),
     lt: endExclusive.toISOString(),
   }
-}
-
-function parseIsoDateLocal(value: string): Date {
-  const [yRaw, mRaw, dRaw] = value.slice(0, 10).split('-')
-  const y = Number.parseInt(yRaw ?? '', 10)
-  const m = Number.parseInt(mRaw ?? '', 10)
-  const d = Number.parseInt(dRaw ?? '', 10)
-  if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return new Date(value)
-  return new Date(y, m - 1, d)
 }
 
 type Envelope = {
@@ -1423,7 +1415,7 @@ export function JournalPage() {
                   <div>
                     <p className="text-sm font-semibold">{entry.source}</p>
                     <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                      {format(new Date(entry.date), 'MMM d, yyyy')} • Net{' '}
+                      {format(parseCalendarDateLocal(entry.date), 'MMM d, yyyy')} • Net{' '}
                       {formatCurrencyFromCents(entry.net_amount_cents)}
                       {entry.deposit_account_id
                         ? ` • ${depositAccounts.find((a) => a.id === entry.deposit_account_id)?.name ?? 'Account'}`
@@ -1452,7 +1444,7 @@ export function JournalPage() {
           <h2 className="text-base font-semibold">Journal Report</h2>
           <div className="mt-3 space-y-2 text-sm">
             <p className="font-semibold">
-              Paycheck — {selectedDetail.source} — {format(new Date(selectedDetail.date), 'MMMM d, yyyy')} — Net:{' '}
+              Paycheck — {selectedDetail.source} — {format(parseCalendarDateLocal(selectedDetail.date), 'MMMM d, yyyy')} — Net:{' '}
               {formatCurrencyFromCents(selectedDetail.net_amount_cents)}
             </p>
             {(() => {
@@ -1492,7 +1484,7 @@ export function JournalPage() {
               selectedAllocations.map((allocation, allocIdx) => (
                 <p key={`${allocation.envelope_id}-${allocIdx}-${allocation.allocation_month}`}>
                   • {allocation.envelope?.name ?? 'Envelope'} → {formatCurrencyFromCents(allocation.amount_cents)} (
-                  {format(parseIsoDateLocal(allocation.allocation_month), 'MMM yyyy')})
+                  {format(parseCalendarDateLocal(allocation.allocation_month), 'MMM yyyy')})
                 </p>
               ))
             )}
@@ -1646,7 +1638,7 @@ export function JournalPage() {
             <div className="mt-2 grid grid-cols-1 gap-1 sm:grid-cols-2 xl:grid-cols-3">
               {reportDailySpending.slice(-9).map((day) => (
                 <p key={day.date} className="text-xs text-zinc-600 dark:text-zinc-300">
-                  {format(new Date(day.date), 'MMM d')}: -{formatCurrencyFromCents(day.spent_cents)}
+                  {format(parseCalendarDateLocal(day.date), 'MMM d')}: -{formatCurrencyFromCents(day.spent_cents)}
                 </p>
               ))}
             </div>
@@ -1680,7 +1672,7 @@ export function JournalPage() {
                       {item.type === 'paycheck' ? `Paycheck • ${item.title}` : `Move • ${item.fromName} → ${item.toName}`}
                     </p>
                     <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                      {format(new Date(item.date), 'MMM d, yyyy')}
+                      {format(parseCalendarDateLocal(item.date), 'MMM d, yyyy')}
                       {item.type === 'move' && item.reason ? ` • ${item.reason}` : ''}
                     </p>
                   </div>
@@ -1701,7 +1693,7 @@ export function JournalPage() {
                     {item.allocations.map((allocation) => (
                       <p key={`${item.id}-${allocation.envelopeName}-${allocation.allocationMonth}`}>
                         • {allocation.envelopeName}: {formatCurrencyFromCents(allocation.amount_cents)} (
-                        {format(parseIsoDateLocal(allocation.allocationMonth), 'MMM yyyy')})
+                        {format(parseCalendarDateLocal(allocation.allocationMonth), 'MMM yyyy')})
                       </p>
                     ))}
                   </div>

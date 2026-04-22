@@ -8,6 +8,7 @@ import {
   formatEnvelopeDropdownLabel,
   normalizeDollarsInput,
 } from '../lib/currency'
+import { localCalendarDateString, parseCalendarDateLocal } from '../lib/localCalendarDate'
 import { getSupabase } from '../lib/supabase'
 
 type EnvelopeOption = {
@@ -91,10 +92,8 @@ type SplitLine = {
   amountDollars: string
 }
 
-const TODAY = new Date().toISOString().slice(0, 10)
-
 const DEFAULT_FORM: TransactionForm = {
-  date: TODAY,
+  date: localCalendarDateString(),
   payee: '',
   amountDollars: '',
   direction: 'outflow',
@@ -191,7 +190,7 @@ export function TransactionsPage() {
       }))
       setImportAccountId((prev) => prev || accountsResp.data?.[0]?.id || '')
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load transactions.')
+      setError(readRpcError(err, 'Failed to load transactions.'))
     } finally {
       setLoading(false)
     }
@@ -341,6 +340,7 @@ export function TransactionsPage() {
   function resetForm() {
     setForm({
       ...DEFAULT_FORM,
+      date: localCalendarDateString(),
       direction: 'outflow',
       envelopeId: orderedEnvelopes[0]?.id ?? '',
       accountId: accounts[0]?.id ?? '',
@@ -490,7 +490,7 @@ export function TransactionsPage() {
       resetForm()
       await loadData()
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not save transaction.')
+      setError(readRpcError(err, 'Could not save transaction.'))
     } finally {
       setSaving(false)
     }
@@ -500,14 +500,19 @@ export function TransactionsPage() {
     setSaving(true)
     setError(null)
     setNotice(null)
+    const row = transactionById[id]
     try {
       const { error: archiveError } = await getSupabase().rpc('archive_transaction', { p_transaction_id: id })
       if (archiveError) throw archiveError
       if (editingId === id) resetForm()
-      setNotice('Transaction archived.')
+      const balanceNote =
+        row?.envelope_id != null
+          ? 'Envelope and account balances were restored.'
+          : 'Only the linked account balance was restored (this row has no envelope — common for internal transfers or the card side of a payment).'
+      setNotice(`Transaction archived. ${balanceNote}`)
       await loadData()
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not archive transaction.')
+      setError(readRpcError(err, 'Could not archive transaction.'))
     } finally {
       setSaving(false)
     }
@@ -523,7 +528,7 @@ export function TransactionsPage() {
       setNotice('Transaction restored.')
       await loadData()
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not restore transaction.')
+      setError(readRpcError(err, 'Could not restore transaction.'))
     } finally {
       setSaving(false)
     }
@@ -547,7 +552,7 @@ export function TransactionsPage() {
       setNotice('Transaction permanently deleted.')
       await loadData()
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not delete transaction.')
+      setError(readRpcError(err, 'Could not delete transaction.'))
     } finally {
       setSaving(false)
     }
@@ -581,7 +586,7 @@ export function TransactionsPage() {
       await loadData()
       setNotice('Selected transactions were reassigned.')
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Bulk assign failed.')
+      setError(readRpcError(err, 'Bulk assign failed.'))
     } finally {
       setSaving(false)
     }
@@ -609,7 +614,7 @@ export function TransactionsPage() {
       await loadData()
       setNotice(`Cleared ${clearedCount} transaction(s).`)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not clear selected transactions.')
+      setError(readRpcError(err, 'Could not clear selected transactions.'))
     } finally {
       setSaving(false)
     }
@@ -803,7 +808,7 @@ export function TransactionsPage() {
         const samePayee = normalizePayee(transaction.payee) === normalizedPayee
         if (!samePayee || transaction.cleared) return false
         const dayDiff = Math.abs(
-          differenceInCalendarDays(new Date(parsedDate), new Date(transaction.date)),
+          differenceInCalendarDays(parseCalendarDateLocal(parsedDate), parseCalendarDateLocal(transaction.date)),
         )
         return dayDiff <= 3
       })
@@ -965,7 +970,7 @@ export function TransactionsPage() {
       await loadData()
       setNotice(`CSV import complete: ${created} created, ${updated} updated, ${skipped} skipped.`)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'CSV import failed.')
+      setError(readRpcError(err, 'CSV import failed.'))
     } finally {
       setApplyingImport(false)
       setSaving(false)
@@ -1619,6 +1624,12 @@ export function TransactionsPage() {
       </CollapsibleCard>
 
       <CollapsibleCard title="Recent Transactions" storageKey="transactions-list">
+        <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+          <strong>Archive</strong> hides the transaction and restores balances the same way as undoing the entry: if the
+          row has an envelope, that envelope and the linked account are credited back; if there is no envelope (e.g. a
+          transfer register line), only the account is adjusted. <strong>Delete</strong> removes the row permanently; if
+          it was still active, balances are adjusted first.
+        </p>
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <button
             type="button"
@@ -1687,7 +1698,7 @@ export function TransactionsPage() {
                 <div className="min-w-0">
                   <p className="truncate text-sm font-medium">{transaction.payee}</p>
                   <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                    {format(new Date(transaction.date), 'MMM d, yyyy')} •{' '}
+                    {format(parseCalendarDateLocal(transaction.date), 'MMM d, yyyy')} •{' '}
                     {transaction.envelope?.name ?? (transaction.envelope_id == null ? 'Account only' : 'Unknown envelope')}{' '}
                     •{' '}
                     {transaction.cleared ? 'Cleared' : 'Pending'}
@@ -1772,7 +1783,7 @@ export function TransactionsPage() {
                 <div className="min-w-0">
                   <p className="truncate text-sm font-medium">{transaction.payee}</p>
                   <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                    {format(new Date(transaction.date), 'MMM d, yyyy')} •{' '}
+                    {format(parseCalendarDateLocal(transaction.date), 'MMM d, yyyy')} •{' '}
                     {transaction.envelope?.name ?? (transaction.envelope_id == null ? 'Account only' : 'Unknown envelope')}
                     {' • '}
                     {transaction.cleared ? 'Cleared' : 'Pending'}
@@ -1816,6 +1827,16 @@ export function TransactionsPage() {
       </CollapsibleCard>
     </div>
   )
+}
+
+/** Supabase / PostgREST errors are often plain `{ message }` objects, not `Error` instances. */
+function readRpcError(err: unknown, fallback: string): string {
+  if (typeof err === 'object' && err !== null && 'message' in err) {
+    const msg = String((err as { message: unknown }).message).trim()
+    if (msg) return msg
+  }
+  if (err instanceof Error && err.message.trim()) return err.message
+  return fallback
 }
 
 /**

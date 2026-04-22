@@ -4,7 +4,6 @@ import {
   eachMonthOfInterval,
   endOfMonth,
   format,
-  parseISO,
   startOfMonth,
   subDays,
   subMonths,
@@ -16,6 +15,7 @@ import { CollapsibleCard } from '../components/ui/CollapsibleCard'
 import { formatCurrencyFromCents } from '../lib/currency'
 import { modelMonthlyPaymentCents, simulateDebtPayoff } from '../lib/debtPayoff'
 import { downloadReportsPdf, pdfCell } from '../lib/reportsPdf'
+import { parseCalendarDateLocal } from '../lib/localCalendarDate'
 import { getSupabase } from '../lib/supabase'
 
 type DatePreset = 'this_month' | 'last_month' | 'last_3_months' | 'this_year' | 'last_12_months' | 'all_time' | 'custom'
@@ -238,8 +238,8 @@ function pairInternalAccountTransfers(transfers: TxRow[]): { pairs: AccountTrans
 /** Same calendar length immediately before `from`…`to`. */
 function computePreviousPeriod(fromStr: string, toStr: string): { from: string; to: string } | null {
   try {
-    const from = parseISO(fromStr)
-    const to = parseISO(toStr)
+    const from = parseCalendarDateLocal(fromStr)
+    const to = parseCalendarDateLocal(toStr)
     if (from > to) return null
     const len = differenceInCalendarDays(to, from) + 1
     if (len < 1) return null
@@ -369,7 +369,7 @@ export function ReportsPage() {
     setError(null)
     try {
       const supabase = getSupabase()
-      const primaryLen = differenceInCalendarDays(parseISO(toDate), parseISO(fromDate)) + 1
+      const primaryLen = differenceInCalendarDays(parseCalendarDateLocal(toDate), parseCalendarDateLocal(fromDate)) + 1
       const compareBlocked = preset === 'all_time' || primaryLen > 366
       const compareRange = !compareBlocked && compareEnabled ? computePreviousPeriod(fromDate, toDate) : null
       if (compareEnabled && compareBlocked) {
@@ -378,8 +378,8 @@ export function ReportsPage() {
         setCompareNotice(null)
       }
 
-      const allocFrom = format(startOfMonth(parseISO(fromDate)), 'yyyy-MM-dd')
-      const allocTo = format(endOfMonth(parseISO(toDate)), 'yyyy-MM-dd')
+      const allocFrom = format(startOfMonth(parseCalendarDateLocal(fromDate)), 'yyyy-MM-dd')
+      const allocTo = format(endOfMonth(parseCalendarDateLocal(toDate)), 'yyyy-MM-dd')
       const debtPaymentsSince = format(subMonths(new Date(), debtAvgWindowMonths), 'yyyy-MM-dd')
       const moveTs = envelopeMovesCreatedAtFilter(fromDate, toDate)
 
@@ -505,8 +505,8 @@ export function ReportsPage() {
       if (compareRange) {
         const cf = compareRange.from
         const ct = compareRange.to
-        const allocFromB = format(startOfMonth(parseISO(cf)), 'yyyy-MM-dd')
-        const allocToB = format(endOfMonth(parseISO(ct)), 'yyyy-MM-dd')
+        const allocFromB = format(startOfMonth(parseCalendarDateLocal(cf)), 'yyyy-MM-dd')
+        const allocToB = format(endOfMonth(parseCalendarDateLocal(ct)), 'yyyy-MM-dd')
         const moveTsB = envelopeMovesCreatedAtFilter(cf, ct)
         const [btxResp, bpcResp, bmvResp, balResp] = await Promise.all([
           supabase
@@ -580,9 +580,9 @@ export function ReportsPage() {
 
   const daysInRange = useMemo(() => {
     try {
-      const a = parseISO(fromDate)
-      const b = parseISO(toDate)
-      return Math.max(1, Math.round((b.getTime() - a.getTime()) / (24 * 60 * 60 * 1000)) + 1)
+      const a = parseCalendarDateLocal(fromDate)
+      const b = parseCalendarDateLocal(toDate)
+      return Math.max(1, differenceInCalendarDays(b, a) + 1)
     } catch {
       return 1
     }
@@ -590,7 +590,7 @@ export function ReportsPage() {
 
   const compareBlocked = useMemo(() => {
     try {
-      const primaryLen = differenceInCalendarDays(parseISO(toDate), parseISO(fromDate)) + 1
+      const primaryLen = differenceInCalendarDays(parseCalendarDateLocal(toDate), parseCalendarDateLocal(fromDate)) + 1
       return preset === 'all_time' || primaryLen > 366
     } catch {
       return true
@@ -712,7 +712,10 @@ export function ReportsPage() {
 
   const calendarMonthsTouched = useMemo(() => {
     try {
-      return eachMonthOfInterval({ start: parseISO(fromDate), end: parseISO(toDate) }).length
+      return eachMonthOfInterval({
+        start: parseCalendarDateLocal(fromDate),
+        end: parseCalendarDateLocal(toDate),
+      }).length
     } catch {
       return 1
     }

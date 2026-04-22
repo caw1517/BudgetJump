@@ -25,16 +25,28 @@ function SavingsMonthlyTargetProgress({
   assignedThisMonthCents: number
 }) {
   const target = budgetTargetCents
-  const current = Math.min(assignedThisMonthCents, target)
-  const need = Math.max(target - current, 0)
-  const caption = `Assigned this month: ${formatCurrencyFromCents(current)} / ${formatCurrencyFromCents(target)} (${formatCurrencyFromCents(need)} to go)`
-  const percent = target > 0 ? Math.max(0, Math.min(100, Math.round((current / target) * 100))) : 0
+  const assigned = assignedThisMonthCents
+
+  const remainderClause =
+    target <= 0
+      ? '(no monthly dollar target set)'
+      : assigned < target
+        ? `(${formatCurrencyFromCents(target - assigned)} to go)`
+        : assigned === target
+          ? '(goal met)'
+          : `(${formatCurrencyFromCents(assigned - target)} over goal)`
+
+  const caption = `Assigned this month: ${formatCurrencyFromCents(assigned)} / ${formatCurrencyFromCents(target)} ${remainderClause}`
+  const percent =
+    target > 0 ? Math.max(0, Math.min(100, Math.round((assigned / target) * 100))) : assigned > 0 ? 100 : 0
+
+  const barClass = assigned >= target && target > 0 ? 'bg-emerald-500' : target > 0 ? 'bg-amber-500' : 'bg-zinc-400'
 
   return (
     <div className="mt-1.5">
       <p className="text-[11px] text-zinc-500 dark:text-zinc-400">{caption}</p>
       <div className="mt-1 h-2 w-full overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700">
-        <div className="h-full rounded-full bg-emerald-500" style={{ width: `${percent}%` }} />
+        <div className={`h-full rounded-full ${barClass}`} style={{ width: `${percent}%` }} />
       </div>
     </div>
   )

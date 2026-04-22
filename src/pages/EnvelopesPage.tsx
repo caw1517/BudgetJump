@@ -188,6 +188,8 @@ export function EnvelopesPage() {
   const [futureAssignedAfterViewByEnvelope, setFutureAssignedAfterViewByEnvelope] = useState<Record<string, number>>(
     {},
   )
+  /** Outflows (positive txn amounts) per envelope in `activeEnvelopesViewMonth` calendar month. */
+  const [spentByEnvelopeViewMonth, setSpentByEnvelopeViewMonth] = useState<Record<string, number>>({})
   const [assignmentWindowStart, setAssignmentWindowStart] = useState(() =>
     startOfMonth(subMonths(new Date(), 5)),
   )
@@ -214,7 +216,9 @@ export function EnvelopesPage() {
       }
       const assignStart = startOfMonth(assignmentWindowStart)
       const assignEnd = endOfMonth(addMonths(assignStart, 5))
-      const [groupsResp, envelopesResp, movesResp, monthAllocationsResp, accountsResp] = await Promise.all([
+      const viewMonthStart = format(startOfMonth(activeEnvelopesViewMonth), 'yyyy-MM-dd')
+      const viewMonthEnd = format(endOfMonth(activeEnvelopesViewMonth), 'yyyy-MM-dd')
+      const [groupsResp, envelopesResp, movesResp, monthAllocationsResp, accountsResp, spentTxResp] = await Promise.all([
         supabase.from('envelope_groups').select('id,name,sort_order,archived').order('sort_order', { ascending: true }),
         supabase
           .from('envelopes')
@@ -239,12 +243,20 @@ export function EnvelopesPage() {
           .eq('archived', false)
           .in('account_type', ['checking', 'savings', 'cash', 'other'])
           .order('name', { ascending: true }),
+        supabase
+          .from('transactions')
+          .select('envelope_id,amount_cents')
+          .eq('archived', false)
+          .gte('date', viewMonthStart)
+          .lte('date', viewMonthEnd)
+          .limit(20_000),
       ])
       if (groupsResp.error) throw groupsResp.error
       if (envelopesResp.error) throw envelopesResp.error
       if (movesResp.error) throw movesResp.error
       if (monthAllocationsResp.error) throw monthAllocationsResp.error
       if (accountsResp.error) throw accountsResp.error
+      if (spentTxResp.error) throw spentTxResp.error
 
       setGroups(groupsResp.data ?? [])
       setEnvelopes(
@@ -286,6 +298,15 @@ export function EnvelopesPage() {
       setAssignmentMatrix(matrix)
       setAllAssignedByEnvelopeMonth(allAssigned)
       setFutureAssignedAfterViewByEnvelope(futureByEnvelope)
+
+      const spentByEnvelope: Record<string, number> = {}
+      for (const row of (spentTxResp.data ?? []) as Array<{ envelope_id: string | null; amount_cents: number }>) {
+        if (!row.envelope_id) continue
+        const out = row.amount_cents > 0 ? row.amount_cents : 0
+        spentByEnvelope[row.envelope_id] = (spentByEnvelope[row.envelope_id] ?? 0) + out
+      }
+      setSpentByEnvelopeViewMonth(spentByEnvelope)
+
       setGroupRename(
         Object.fromEntries((groupsResp.data ?? []).map((group) => [group.id, group.name])),
       )
@@ -1547,6 +1568,16 @@ export function EnvelopesPage() {
           <p className="mt-3 text-sm text-zinc-500 dark:text-zinc-400">No active envelopes yet. Add your first one above.</p>
         ) : (
           <div className="mt-4 space-y-4">
+            <div className="mb-1 hidden gap-3 px-3.5 sm:grid sm:grid-cols-[minmax(0,1fr)_5.5rem_6.5rem_auto] sm:items-end">
+              <span />
+              <span className="text-right text-[11px] font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                Spent ({format(activeEnvelopesViewMonth, 'MMM')})
+              </span>
+              <span className="text-right text-[11px] font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                Availability
+              </span>
+              <span />
+            </div>
             {groupedEnvelopes.map((group) => (
               <div
                 key={group.id}
@@ -1597,7 +1628,7 @@ export function EnvelopesPage() {
                         void dropEnvelopeOnEnvelope(envelope.id, targetGroupId)
                       }}
                       className={[
-                        'flex cursor-grab flex-col gap-2 rounded-xl border p-3.5 transition-all active:cursor-grabbing sm:flex-row sm:items-center',
+                        'grid cursor-grab grid-cols-2 gap-x-3 gap-y-2 rounded-xl border p-3.5 transition-all active:cursor-grabbing sm:grid-cols-[minmax(0,1fr)_5.5rem_6.5rem_auto] sm:items-start sm:gap-3',
                         draggingEnvelopeId === envelope.id
                           ? 'border-emerald-400 bg-emerald-50/80 opacity-75 shadow-sm dark:border-emerald-700 dark:bg-emerald-950/30'
                           : dragOverEnvelopeId === envelope.id
@@ -1605,8 +1636,8 @@ export function EnvelopesPage() {
                             : 'border-zinc-200 dark:border-zinc-800',
                       ].join(' ')}
                     >
-                      <div className="flex min-w-0 flex-1 items-center gap-3">
-                        <span className="h-3 w-3 rounded-full" style={{ backgroundColor: envelope.color }} />
+                      <div className="col-span-2 flex min-w-0 items-center gap-3 sm:col-span-1">
+                        <span className="h-3 w-3 shrink-0 rounded-full" style={{ backgroundColor: envelope.color }} />
                         <div className="min-w-0">
                           <p className="truncate text-sm font-medium">{envelope.name}</p>
                           <p className="text-xs text-zinc-500 dark:text-zinc-400">
@@ -1646,18 +1677,30 @@ export function EnvelopesPage() {
                         </div>
                       </div>
                       <div className="text-right">
-                        <div className="text-sm font-semibold">
+                        <p className="text-[10px] font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 sm:hidden">
+                          Spent ({format(activeEnvelopesViewMonth, 'MMM')})
+                        </p>
+                        <p className="text-sm font-semibold tabular-nums">
+                          {formatCurrencyFromCents(spentByEnvelopeViewMonth[envelope.id] ?? 0)}
+                        </p>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-[10px] font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 sm:hidden">
+                          Availability
+                        </p>
+                        <div className="text-sm font-semibold tabular-nums">
                           {formatCurrencyFromCents(
                             envelope.balance_cents - (futureAssignedAfterViewByEnvelope[envelope.id] ?? 0),
                           )}
                         </div>
                         {(futureAssignedAfterViewByEnvelope[envelope.id] ?? 0) > 0 && (
-                          <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
-                            {format(activeEnvelopesViewMonth, 'MMMM')} availability
+                          <p className="mt-0.5 text-[10px] leading-tight text-zinc-500 dark:text-zinc-400">
+                            Excludes {formatCurrencyFromCents(futureAssignedAfterViewByEnvelope[envelope.id] ?? 0)}{' '}
+                            reserved for future months
                           </p>
                         )}
                       </div>
-                      <div className="flex gap-2">
+                      <div className="col-span-2 flex justify-end gap-2 sm:col-span-1 sm:justify-start">
                         <button type="button" onClick={() => beginEdit(envelope)} className="btn-secondary px-3 text-xs">
                           Edit
                         </button>
@@ -1948,16 +1991,29 @@ function EnvelopeMonthlyTargetProgress({
   assignedMonthLabel: string
 }) {
   const target = budgetTargetCents
-  const current = Math.min(assignedThisMonthCents, target)
-  const need = Math.max(target - current, 0)
-  const caption = `Assigned in ${assignedMonthLabel}: ${formatCurrencyFromCents(current)} / ${formatCurrencyFromCents(target)} (${formatCurrencyFromCents(need)} to go)`
-  const percent = Math.max(0, Math.min(100, Math.round((current / target) * 100)))
+  const assigned = assignedThisMonthCents
+
+  const remainderClause =
+    target <= 0
+      ? '(no monthly dollar target set)'
+      : assigned < target
+        ? `(${formatCurrencyFromCents(target - assigned)} to go)`
+        : assigned === target
+          ? '(goal met)'
+          : `(${formatCurrencyFromCents(assigned - target)} over goal)`
+
+  const caption = `Assigned in ${assignedMonthLabel}: ${formatCurrencyFromCents(assigned)} / ${formatCurrencyFromCents(target)} ${remainderClause}`
+
+  const percent =
+    target > 0 ? Math.max(0, Math.min(100, Math.round((assigned / target) * 100))) : assigned > 0 ? 100 : 0
+
+  const barClass = assigned >= target && target > 0 ? 'bg-emerald-500' : target > 0 ? 'bg-amber-500' : 'bg-zinc-400'
 
   return (
     <div className="mt-1.5">
       <p className="text-[11px] text-zinc-500 dark:text-zinc-400">{caption}</p>
       <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700">
-        <div className="h-full rounded-full bg-emerald-500" style={{ width: `${percent}%` }} />
+        <div className={`h-full rounded-full ${barClass}`} style={{ width: `${percent}%` }} />
       </div>
     </div>
   )

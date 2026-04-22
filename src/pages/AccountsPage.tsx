@@ -9,6 +9,7 @@ import {
   normalizeDollarsInput,
 } from '../lib/currency'
 import { renameDebtEnvelopeIfPresent, syncDebtEnvelopeMonthlyGoalFromMinimum } from '../lib/debtEnvelopeSync'
+import { parseCalendarDateLocal } from '../lib/localCalendarDate'
 import { getSupabase } from '../lib/supabase'
 
 type AccountType = 'checking' | 'savings' | 'credit_card' | 'debt' | 'cash' | 'other'
@@ -1234,7 +1235,7 @@ export function AccountsPage() {
                 <div className="min-w-0">
                   <p className="truncate text-sm font-medium">{row.payee}</p>
                   <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                    {format(new Date(row.date), 'MMM d, yyyy')} •{' '}
+                    {format(parseCalendarDateLocal(row.date), 'MMM d, yyyy')} •{' '}
                     {row.entry_kind === 'paycheck'
                       ? 'Journal paycheck'
                       : row.cleared

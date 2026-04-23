@@ -12,6 +12,7 @@ import {
 import { Link } from 'react-router-dom'
 import { SpendingPieChart, type PieSlice } from '../components/reports/SpendingPieChart'
 import { CollapsibleCard } from '../components/ui/CollapsibleCard'
+import { DatePickerInput } from '../components/ui/DatePickerInput'
 import { formatCurrencyFromCents } from '../lib/currency'
 import { modelMonthlyPaymentCents, simulateDebtPayoff } from '../lib/debtPayoff'
 import { downloadReportsPdf, pdfCell } from '../lib/reportsPdf'
@@ -975,26 +976,26 @@ export function ReportsPage() {
         <div className="mt-3 grid max-w-xl grid-cols-1 gap-3 sm:grid-cols-2 print:hidden">
           <label className="text-sm">
             <span className="mb-1 block text-zinc-700 dark:text-zinc-300">From</span>
-            <input
-              type="date"
+            <DatePickerInput
               value={fromDate}
-              onChange={(e) => {
+              onChange={(value) => {
                 setPreset('custom')
-                setFromDate(e.target.value)
+                setFromDate(value)
               }}
               className="min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-950"
+              aria-label="report from date"
             />
           </label>
           <label className="text-sm">
             <span className="mb-1 block text-zinc-700 dark:text-zinc-300">To</span>
-            <input
-              type="date"
+            <DatePickerInput
               value={toDate}
-              onChange={(e) => {
+              onChange={(value) => {
                 setPreset('custom')
-                setToDate(e.target.value)
+                setToDate(value)
               }}
               className="min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-950"
+              aria-label="report to date"
             />
           </label>
         </div>

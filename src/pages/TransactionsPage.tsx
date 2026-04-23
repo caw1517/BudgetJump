@@ -1,6 +1,7 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react'
 import { differenceInCalendarDays, format, parse, startOfMonth, subDays } from 'date-fns'
 import { CollapsibleCard } from '../components/ui/CollapsibleCard'
+import { DatePickerInput } from '../components/ui/DatePickerInput'
 import {
   dollarsStringToCents,
   formatAccountDropdownLabel,
@@ -72,6 +73,21 @@ type ImportPreviewRow = {
   likelyMatches: string[]
 }
 
+type CsvCompareRow = {
+  rowIndex: number
+  date: string
+  description: string
+  amountCents: number
+}
+
+type CompareResultRow = {
+  id: string
+  status: 'both' | 'csv_only' | 'app_only'
+  amountCents: number
+  csv: CsvCompareRow | null
+  app: TransactionRow | null
+}
+
 type DatePreset = 'all_time' | 'this_month' | 'last_30' | 'last_90' | 'custom'
 
 type TransactionForm = {
@@ -130,6 +146,11 @@ export function TransactionsPage() {
   const [importFileName, setImportFileName] = useState('')
   const [applyingImport, setApplyingImport] = useState(false)
   const [importAccountId, setImportAccountId] = useState('')
+  const [compareRows, setCompareRows] = useState<CsvCompareRow[]>([])
+  const [compareFileName, setCompareFileName] = useState('')
+  const [compareFromDate, setCompareFromDate] = useState('')
+  const [compareToDate, setCompareToDate] = useState('')
+  const [compareResults, setCompareResults] = useState<CompareResultRow[]>([])
   const [selectedTransactionIds, setSelectedTransactionIds] = useState<string[]>([])
   const [bulkEnvelopeId, setBulkEnvelopeId] = useState('')
   const [splitMode, setSplitMode] = useState(false)
@@ -984,6 +1005,148 @@ export function TransactionsPage() {
     setError(null)
   }
 
+  async function onCompareCsvSelected(file: File) {
+    setError(null)
+    setNotice(null)
+    const text = await file.text()
+    const lines = text
+      .split(/\r?\n/g)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0)
+
+    if (lines.length < 2) {
+      setError('CSV appears empty.')
+      setCompareRows([])
+      setCompareResults([])
+      return
+    }
+
+    const header = parseCsvLine(lines[0]).map((column) => column.toLowerCase())
+    const dateIndex = header.indexOf('date') >= 0 ? header.indexOf('date') : header.indexOf('posting date')
+    const descriptionIndex = header.indexOf('description')
+    const amountIndex = header.indexOf('amount')
+    if (dateIndex === -1 || descriptionIndex === -1 || amountIndex === -1) {
+      setError('CSV must include Posting Date (or Date), Description, and Amount columns.')
+      setCompareRows([])
+      setCompareResults([])
+      return
+    }
+
+    const parsedRows = lines.slice(1).flatMap((line, idx) => {
+      const values = parseCsvLine(line)
+      const parsedDate = parseChaseDate(values[dateIndex] ?? '')
+      const amountRaw = parseCsvAmount(values[amountIndex] ?? '')
+      const description = (values[descriptionIndex] ?? '').trim()
+      if (!parsedDate || amountRaw == null) return []
+      return [
+        {
+          rowIndex: idx + 2,
+          date: parsedDate,
+          description,
+          amountCents: Math.abs(amountRaw),
+        } satisfies CsvCompareRow,
+      ]
+    })
+
+    setCompareRows(parsedRows)
+    setCompareFileName(file.name)
+    setCompareResults([])
+    setNotice(`Loaded ${parsedRows.length} valid rows for comparison.`)
+  }
+
+  function clearComparePreview() {
+    setCompareRows([])
+    setCompareFileName('')
+    setCompareResults([])
+    setCompareFromDate('')
+    setCompareToDate('')
+    setError(null)
+    setNotice(null)
+  }
+
+  function runCsvComparison() {
+    setError(null)
+    setNotice(null)
+    if (compareRows.length === 0) {
+      setError('Choose a CSV first.')
+      return
+    }
+    if (!compareFromDate || !compareToDate) {
+      setError('Choose a comparison date range.')
+      return
+    }
+    if (compareFromDate > compareToDate) {
+      setError('From date cannot be after To date.')
+      return
+    }
+
+    const csvInRange = compareRows
+      .filter((row) => row.date >= compareFromDate && row.date <= compareToDate)
+      .sort((a, b) => (a.date === b.date ? a.rowIndex - b.rowIndex : a.date.localeCompare(b.date)))
+
+    const appInRange = transactions
+      .filter((row) => row.date >= compareFromDate && row.date <= compareToDate)
+      .sort((a, b) => (a.date === b.date ? a.id.localeCompare(b.id) : a.date.localeCompare(b.date)))
+
+    const csvByAmount = new Map<number, CsvCompareRow[]>()
+    const appByAmount = new Map<number, TransactionRow[]>()
+    for (const row of csvInRange) {
+      const existing = csvByAmount.get(row.amountCents)
+      if (existing) existing.push(row)
+      else csvByAmount.set(row.amountCents, [row])
+    }
+    for (const row of appInRange) {
+      const amount = Math.abs(row.amount_cents)
+      const existing = appByAmount.get(amount)
+      if (existing) existing.push(row)
+      else appByAmount.set(amount, [row])
+    }
+
+    const amountKeys = [...new Set([...csvByAmount.keys(), ...appByAmount.keys()])].sort((a, b) => b - a)
+    const rows: CompareResultRow[] = []
+    for (const amount of amountKeys) {
+      const csvAmountRows = csvByAmount.get(amount) ?? []
+      const appAmountRows = appByAmount.get(amount) ?? []
+      const overlapCount = Math.min(csvAmountRows.length, appAmountRows.length)
+
+      for (let i = 0; i < overlapCount; i += 1) {
+        rows.push({
+          id: `both-${amount}-${i}`,
+          status: 'both',
+          amountCents: amount,
+          csv: csvAmountRows[i],
+          app: appAmountRows[i],
+        })
+      }
+      for (let i = overlapCount; i < csvAmountRows.length; i += 1) {
+        rows.push({
+          id: `csv-${amount}-${i}`,
+          status: 'csv_only',
+          amountCents: amount,
+          csv: csvAmountRows[i],
+          app: null,
+        })
+      }
+      for (let i = overlapCount; i < appAmountRows.length; i += 1) {
+        rows.push({
+          id: `app-${amount}-${i}`,
+          status: 'app_only',
+          amountCents: amount,
+          csv: null,
+          app: appAmountRows[i],
+        })
+      }
+    }
+
+    setCompareResults(rows)
+    const bothCount = rows.filter((row) => row.status === 'both').length
+    const csvOnlyCount = rows.filter((row) => row.status === 'csv_only').length
+    const appOnlyCount = rows.filter((row) => row.status === 'app_only').length
+    setNotice(
+      `Compared ${compareFromDate} to ${compareToDate}: ${bothCount} matched by amount, ${csvOnlyCount} CSV-only, ${appOnlyCount} app-only.`,
+    )
+  }
+
   return (
     <div className="space-y-6 sm:space-y-7 xl:space-y-8">
       <section className="card-surface p-4 sm:p-6">
@@ -1043,11 +1206,15 @@ export function TransactionsPage() {
               type="file"
               accept=".csv,text/csv"
               className="hidden"
+              onClick={(event) => {
+                event.currentTarget.value = ''
+              }}
               onChange={(event) => {
                 const file = event.target.files?.[0]
                 if (file) {
                   void onCsvSelected(file)
                 }
+                event.currentTarget.value = ''
               }}
             />
             Choose CSV
@@ -1198,6 +1365,130 @@ export function TransactionsPage() {
         )}
       </CollapsibleCard>
 
+      <CollapsibleCard title="CSV Compare (No Import)" storageKey="transactions-compare">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h2 className="text-base font-semibold">CSV Compare (No Import)</h2>
+          <div className="flex items-center gap-2">
+            {compareFileName && <span className="text-xs text-zinc-500 dark:text-zinc-400">{compareFileName}</span>}
+            {(compareFileName || compareResults.length > 0) && (
+              <button
+                type="button"
+                onClick={clearComparePreview}
+                className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-zinc-300 bg-white text-sm font-semibold text-zinc-600 transition hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                aria-label="Clear compare preview"
+                title="Clear compare preview"
+              >
+                ×
+              </button>
+            )}
+          </div>
+        </div>
+        <p className="mt-2 text-sm text-zinc-600 dark:text-zinc-400">
+          Upload a CSV and compare it to app transactions without saving anything. Matching uses amount only.
+        </p>
+
+        <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <label className="text-xs text-zinc-600 dark:text-zinc-400">
+            From
+            <DatePickerInput
+              value={compareFromDate}
+              onChange={setCompareFromDate}
+              className="mt-1 min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-950"
+              aria-label="compare from date"
+            />
+          </label>
+          <label className="text-xs text-zinc-600 dark:text-zinc-400">
+            To
+            <DatePickerInput
+              value={compareToDate}
+              onChange={setCompareToDate}
+              className="mt-1 min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-950"
+              aria-label="compare to date"
+            />
+          </label>
+        </div>
+
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <label className="btn-secondary inline-flex cursor-pointer items-center px-3 text-sm">
+            <input
+              type="file"
+              accept=".csv,text/csv"
+              className="hidden"
+              onClick={(event) => {
+                event.currentTarget.value = ''
+              }}
+              onChange={(event) => {
+                const file = event.target.files?.[0]
+                if (file) void onCompareCsvSelected(file)
+                event.currentTarget.value = ''
+              }}
+            />
+            Choose CSV
+          </label>
+          <button
+            type="button"
+            onClick={runCsvComparison}
+            disabled={compareRows.length === 0 || !compareFromDate || !compareToDate}
+            className="btn-primary px-4 text-sm"
+          >
+            Compare
+          </button>
+        </div>
+
+        {compareResults.length > 0 && (
+          <div className="mt-4 space-y-2">
+            {compareResults.map((row) => (
+              <div
+                key={row.id}
+                className={[
+                  'rounded-xl border p-3.5',
+                  row.status === 'both'
+                    ? 'border-emerald-300 bg-emerald-50/60 dark:border-emerald-800 dark:bg-emerald-950/30'
+                    : row.status === 'csv_only'
+                      ? 'border-amber-300 bg-amber-50/60 dark:border-amber-800 dark:bg-amber-950/30'
+                      : 'border-sky-300 bg-sky-50/60 dark:border-sky-800 dark:bg-sky-950/30',
+                ].join(' ')}
+              >
+                <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-sm font-semibold">
+                    {row.status === 'both'
+                      ? 'Matched by amount'
+                      : row.status === 'csv_only'
+                        ? 'CSV only (missing in app)'
+                        : 'App only (missing in CSV)'}
+                  </p>
+                  <p className="text-sm font-semibold">{formatCurrencyFromCents(row.amountCents)}</p>
+                </div>
+                <div className="grid grid-cols-1 gap-2 text-xs sm:grid-cols-2">
+                  <div className="rounded-lg border border-zinc-200 bg-white/70 p-2.5 dark:border-zinc-800 dark:bg-zinc-950/30">
+                    <p className="mb-1 font-semibold text-zinc-700 dark:text-zinc-200">CSV</p>
+                    {row.csv ? (
+                      <>
+                        <p>{row.csv.description || '(blank description)'}</p>
+                        <p className="text-zinc-500 dark:text-zinc-400">{row.csv.date}</p>
+                      </>
+                    ) : (
+                      <p className="text-zinc-500 dark:text-zinc-400">No CSV row for this amount.</p>
+                    )}
+                  </div>
+                  <div className="rounded-lg border border-zinc-200 bg-white/70 p-2.5 dark:border-zinc-800 dark:bg-zinc-950/30">
+                    <p className="mb-1 font-semibold text-zinc-700 dark:text-zinc-200">App</p>
+                    {row.app ? (
+                      <>
+                        <p>{row.app.payee || '(blank payee)'}</p>
+                        <p className="text-zinc-500 dark:text-zinc-400">{row.app.date}</p>
+                      </>
+                    ) : (
+                      <p className="text-zinc-500 dark:text-zinc-400">No app transaction for this amount.</p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </CollapsibleCard>
+
       <CollapsibleCard
         title={editingId ? 'Edit Transaction' : 'Add Transaction'}
         storageKey="transactions-form"
@@ -1205,12 +1496,12 @@ export function TransactionsPage() {
         <form onSubmit={submitTransaction} className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
           <label className="text-sm">
             <span className="mb-1 block text-zinc-700 dark:text-zinc-300">Date</span>
-            <input
-              type="date"
+            <DatePickerInput
               value={form.date}
-              onChange={(event) => setForm((prev) => ({ ...prev, date: event.target.value }))}
-            className="min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-950"
+              onChange={(value) => setForm((prev) => ({ ...prev, date: value }))}
+              className="min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-950"
               required
+              aria-label="transaction date"
             />
           </label>
           <label className="text-sm">
@@ -1562,23 +1853,23 @@ export function TransactionsPage() {
             <option value="cleared">Cleared only</option>
             <option value="pending">Pending only</option>
           </select>
-          <input
-            type="date"
+          <DatePickerInput
             value={filterFromDate}
-            onChange={(event) => {
+            onChange={(value) => {
               setDatePreset('custom')
-              setFilterFromDate(event.target.value)
+              setFilterFromDate(value)
             }}
             className="min-h-11 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
+            aria-label="filter from date"
           />
-          <input
-            type="date"
+          <DatePickerInput
             value={filterToDate}
-            onChange={(event) => {
+            onChange={(value) => {
               setDatePreset('custom')
-              setFilterToDate(event.target.value)
+              setFilterToDate(value)
             }}
             className="min-h-11 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
+            aria-label="filter to date"
           />
         </div>
       </CollapsibleCard>

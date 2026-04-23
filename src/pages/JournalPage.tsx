@@ -1,6 +1,7 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState, memo } from 'react'
 import { format } from 'date-fns'
 import { CollapsibleCard } from '../components/ui/CollapsibleCard'
+import { DatePickerInput } from '../components/ui/DatePickerInput'
 import {
   dollarsStringToCents,
   formatAccountDropdownLabel,
@@ -1041,12 +1042,12 @@ export function JournalPage() {
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
             <label className="text-sm">
               <span className="mb-1 block text-zinc-700 dark:text-zinc-300">Date</span>
-              <input
-                type="date"
+              <DatePickerInput
                 value={date}
-                onChange={(e) => setDate(e.target.value)}
+                onChange={setDate}
                 required
                 className="min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
+                aria-label="paycheck date"
               />
             </label>
             <div className="text-sm sm:col-span-2 xl:col-span-3">
@@ -1547,23 +1548,23 @@ export function JournalPage() {
           ))}
         </div>
         <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:max-w-xl print:hidden">
-          <input
-            type="date"
+          <DatePickerInput
             value={reportFromDate}
-            onChange={(event) => {
+            onChange={(value) => {
               setReportPreset('custom')
-              setReportFromDate(event.target.value)
+              setReportFromDate(value)
             }}
             className="min-h-11 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
+            aria-label="journal report from date"
           />
-          <input
-            type="date"
+          <DatePickerInput
             value={reportToDate}
-            onChange={(event) => {
+            onChange={(value) => {
               setReportPreset('custom')
-              setReportToDate(event.target.value)
+              setReportToDate(value)
             }}
             className="min-h-11 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
+            aria-label="journal report to date"
           />
         </div>
 

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { format, startOfMonth, subDays } from 'date-fns'
 import { CollapsibleCard } from '../components/ui/CollapsibleCard'
+import { DatePickerInput } from '../components/ui/DatePickerInput'
 import {
   dollarsStringToCents,
   formatAccountDropdownLabel,
@@ -970,11 +971,11 @@ export function AccountsPage() {
         <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
           <label className="text-sm">
             <span className="mb-1 block text-zinc-700 dark:text-zinc-300">Date</span>
-            <input
-              type="date"
+            <DatePickerInput
               value={transferDate}
-              onChange={(event) => setTransferDate(event.target.value)}
+              onChange={setTransferDate}
               className="min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
+              aria-label="debt payment date"
             />
           </label>
           <label className="text-sm">
@@ -1074,11 +1075,11 @@ export function AccountsPage() {
         <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
           <label className="text-sm">
             <span className="mb-1 block text-zinc-700 dark:text-zinc-300">Date</span>
-            <input
-              type="date"
+            <DatePickerInput
               value={transferDate}
-              onChange={(event) => setTransferDate(event.target.value)}
+              onChange={setTransferDate}
               className="min-h-11 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
+              aria-label="internal transfer date"
             />
           </label>
           <label className="text-sm">
@@ -1198,23 +1199,23 @@ export function AccountsPage() {
             placeholder="Search payee or note"
             className="min-h-11 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950 lg:col-span-2 xl:col-span-4"
           />
-          <input
-            type="date"
+          <DatePickerInput
             value={registerFromDate}
-            onChange={(event) => {
+            onChange={(value) => {
               setRegisterDatePreset('custom')
-              setRegisterFromDate(event.target.value)
+              setRegisterFromDate(value)
             }}
             className="min-h-11 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
+            aria-label="register from date"
           />
-          <input
-            type="date"
+          <DatePickerInput
             value={registerToDate}
-            onChange={(event) => {
+            onChange={(value) => {
               setRegisterDatePreset('custom')
-              setRegisterToDate(event.target.value)
+              setRegisterToDate(value)
             }}
             className="min-h-11 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
+            aria-label="register to date"
           />
         </div>
         {loading ? (

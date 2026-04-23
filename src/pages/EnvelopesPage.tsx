@@ -9,6 +9,7 @@ import {
 } from '../lib/currency'
 import { addMonths, endOfMonth, format, startOfMonth, subDays, subMonths } from 'date-fns'
 import { CollapsibleCard } from '../components/ui/CollapsibleCard'
+import { DatePickerInput } from '../components/ui/DatePickerInput'
 import {
   isBillPaidForMonth,
   monthKeyFromDate,
@@ -1760,23 +1761,23 @@ export function EnvelopesPage() {
           ))}
         </div>
         <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:max-w-xl">
-          <input
-            type="date"
+          <DatePickerInput
             value={movesFromDate}
-            onChange={(event) => {
+            onChange={(value) => {
               setMovesDatePreset('custom')
-              setMovesFromDate(event.target.value)
+              setMovesFromDate(value)
             }}
             className="min-h-11 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
+            aria-label="moves from date"
           />
-          <input
-            type="date"
+          <DatePickerInput
             value={movesToDate}
-            onChange={(event) => {
+            onChange={(value) => {
               setMovesDatePreset('custom')
-              setMovesToDate(event.target.value)
+              setMovesToDate(value)
             }}
             className="min-h-11 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none ring-emerald-500/40 focus:border-emerald-500 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950"
+            aria-label="moves to date"
           />
         </div>
         {loading ? (

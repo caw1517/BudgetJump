@@ -371,6 +371,22 @@ export function EnvelopesPage() {
     [activeEnvelopes],
   )
 
+  const availabilityByEnvelopeId = useMemo(
+    () =>
+      Object.fromEntries(
+        activeEnvelopes.map((envelope) => [
+          envelope.id,
+          envelope.balance_cents - (futureAssignedAfterViewByEnvelope[envelope.id] ?? 0),
+        ]),
+      ) as Record<string, number>,
+    [activeEnvelopes, futureAssignedAfterViewByEnvelope],
+  )
+
+  const negativeAvailabilityEnvelopes = useMemo(
+    () => activeEnvelopes.filter((envelope) => (availabilityByEnvelopeId[envelope.id] ?? 0) < 0),
+    [activeEnvelopes, availabilityByEnvelopeId],
+  )
+
   const upcomingBills = useMemo(() => {
     const withDue = activeEnvelopes.filter((e) => e.due_day_of_month != null && e.type !== 'debt')
     const today = new Date()
@@ -770,6 +786,29 @@ export function EnvelopesPage() {
     }
   }
 
+  function beginMoveToCoverNegativeAvailability(destinationEnvelope: Envelope) {
+    const shortageCents = Math.abs(availabilityByEnvelopeId[destinationEnvelope.id] ?? destinationEnvelope.balance_cents)
+    const sourceEnvelope =
+      activeEnvelopes.find(
+        (envelope) =>
+          envelope.id !== destinationEnvelope.id && (availabilityByEnvelopeId[envelope.id] ?? envelope.balance_cents) >= shortageCents,
+      ) ??
+      activeEnvelopes.find(
+        (envelope) =>
+          envelope.id !== destinationEnvelope.id && (availabilityByEnvelopeId[envelope.id] ?? envelope.balance_cents) > 0,
+      )
+
+    setMoveForm({
+      fromEnvelopeId: sourceEnvelope?.id ?? '',
+      toEnvelopeId: destinationEnvelope.id,
+      amountDollars: (shortageCents / 100).toFixed(2),
+      reason: `Cover negative availability in ${destinationEnvelope.name}`,
+    })
+    setError(null)
+    setNotice(null)
+    setMoveOpen(true)
+  }
+
   async function applyEnvelopeTotalReconciliation() {
     if (!reconcileEnvelopeId || envelopeAccountDeltaCents === 0) return
     const envelope = activeEnvelopes.find((item) => item.id === reconcileEnvelopeId)
@@ -917,7 +956,7 @@ export function EnvelopesPage() {
       })
       if (rpcError) throw rpcError
       const count = typeof data === 'number' ? data : 0
-      setNotice(count > 0 ? `Posted ${count} subscription payment${count === 1 ? '' : 's'}.` : 'No subscriptions were due today.')
+      setNotice(count > 0 ? `Processed ${count} subscription payment${count === 1 ? '' : 's'}.` : 'No subscriptions were due today.')
       await loadData()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not run subscription autopay.')
@@ -1563,6 +1602,27 @@ export function EnvelopesPage() {
         <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
           Monthly assignment progress uses paycheck allocations recorded in the month shown (balances stay live).
         </p>
+        {!loading && negativeAvailabilityEnvelopes.length > 0 && (
+          <div className="mt-3 rounded-xl border border-red-300 bg-red-50 p-3 text-sm text-red-900 dark:border-red-800 dark:bg-red-950/30 dark:text-red-100">
+            <p className="font-medium">
+              {negativeAvailabilityEnvelopes.length === 1
+                ? 'One category has negative availability.'
+                : `${negativeAvailabilityEnvelopes.length} categories have negative availability.`}
+            </p>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {negativeAvailabilityEnvelopes.map((envelope) => (
+                <button
+                  key={envelope.id}
+                  type="button"
+                  onClick={() => beginMoveToCoverNegativeAvailability(envelope)}
+                  className="min-h-9 rounded-lg border border-red-400 px-3 text-xs font-medium transition hover:bg-red-100 dark:border-red-700 dark:hover:bg-red-900/40"
+                >
+                  Move {formatCurrencyFromCents(Math.abs(availabilityByEnvelopeId[envelope.id] ?? 0))} to {envelope.name}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
         {loading ? (
           <p className="mt-3 text-sm text-zinc-500 dark:text-zinc-400">Loading envelopes...</p>
         ) : groupedEnvelopes.length === 0 ? (
@@ -1603,114 +1663,132 @@ export function EnvelopesPage() {
               >
                 <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">{group.label}</h3>
                 <div className="space-y-2">
-                  {group.envelopes.map((envelope) => (
-                    <div
-                      key={envelope.id}
-                      draggable
-                      onDragStart={() => setDraggingEnvelopeId(envelope.id)}
-                      onDragEnd={() => {
-                        setDraggingEnvelopeId(null)
-                        setDragOverEnvelopeId(null)
-                        setDragOverGroupId(null)
-                      }}
-                      onDragOver={(event) => {
-                        event.preventDefault()
-                        if (draggingEnvelopeId) {
-                          setDragOverEnvelopeId(envelope.id)
-                          setDragOverGroupId(group.id)
-                        }
-                      }}
-                      onDragLeave={() => {
-                        if (dragOverEnvelopeId === envelope.id) setDragOverEnvelopeId(null)
-                      }}
-                      onDrop={(event) => {
-                        event.preventDefault()
-                        const targetGroupId = group.id === 'ungrouped' ? null : group.id
-                        void dropEnvelopeOnEnvelope(envelope.id, targetGroupId)
-                      }}
-                      className={[
-                        'grid cursor-grab grid-cols-2 gap-x-3 gap-y-2 rounded-xl border p-3.5 transition-all active:cursor-grabbing sm:grid-cols-[minmax(0,1fr)_5.5rem_6.5rem_auto] sm:items-start sm:gap-3',
-                        draggingEnvelopeId === envelope.id
-                          ? 'border-emerald-400 bg-emerald-50/80 opacity-75 shadow-sm dark:border-emerald-700 dark:bg-emerald-950/30'
-                          : dragOverEnvelopeId === envelope.id
-                            ? 'border-sky-400 bg-sky-50/70 ring-2 ring-sky-300/70 dark:border-sky-700 dark:bg-sky-950/30 dark:ring-sky-800/60'
-                            : 'border-zinc-200 dark:border-zinc-800',
-                      ].join(' ')}
-                    >
-                      <div className="col-span-2 flex min-w-0 items-center gap-3 sm:col-span-1">
-                        <span className="h-3 w-3 shrink-0 rounded-full" style={{ backgroundColor: envelope.color }} />
-                        <div className="min-w-0">
-                          <p className="truncate text-sm font-medium">{envelope.name}</p>
-                          <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                            {envelope.type.toUpperCase()}
-                            {envelope.goal_type === 'refill_up_to' && (envelope.goal_target_cents ?? 0) > 0
-                              ? ` • Refill up to ${formatCurrencyFromCents(envelope.goal_target_cents ?? 0)}`
-                              : envelope.budget_target_cents > 0
-                                ? ` • Assign monthly ${formatCurrencyFromCents(envelope.budget_target_cents)}`
+                  {group.envelopes.map((envelope) => {
+                    const availabilityCents = availabilityByEnvelopeId[envelope.id] ?? envelope.balance_cents
+                    const isNegativeAvailability = availabilityCents < 0
+                    return (
+                      <div
+                        key={envelope.id}
+                        draggable
+                        onDragStart={() => setDraggingEnvelopeId(envelope.id)}
+                        onDragEnd={() => {
+                          setDraggingEnvelopeId(null)
+                          setDragOverEnvelopeId(null)
+                          setDragOverGroupId(null)
+                        }}
+                        onDragOver={(event) => {
+                          event.preventDefault()
+                          if (draggingEnvelopeId) {
+                            setDragOverEnvelopeId(envelope.id)
+                            setDragOverGroupId(group.id)
+                          }
+                        }}
+                        onDragLeave={() => {
+                          if (dragOverEnvelopeId === envelope.id) setDragOverEnvelopeId(null)
+                        }}
+                        onDrop={(event) => {
+                          event.preventDefault()
+                          const targetGroupId = group.id === 'ungrouped' ? null : group.id
+                          void dropEnvelopeOnEnvelope(envelope.id, targetGroupId)
+                        }}
+                        className={[
+                          'grid cursor-grab grid-cols-2 gap-x-3 gap-y-2 rounded-xl border p-3.5 transition-all active:cursor-grabbing sm:grid-cols-[minmax(0,1fr)_5.5rem_6.5rem_auto] sm:items-start sm:gap-3',
+                          draggingEnvelopeId === envelope.id
+                            ? 'border-emerald-400 bg-emerald-50/80 opacity-75 shadow-sm dark:border-emerald-700 dark:bg-emerald-950/30'
+                            : dragOverEnvelopeId === envelope.id
+                              ? 'border-sky-400 bg-sky-50/70 ring-2 ring-sky-300/70 dark:border-sky-700 dark:bg-sky-950/30 dark:ring-sky-800/60'
+                              : isNegativeAvailability
+                                ? 'border-red-300 bg-red-50/50 dark:border-red-900/80 dark:bg-red-950/20'
+                                : 'border-zinc-200 dark:border-zinc-800',
+                        ].join(' ')}
+                      >
+                        <div className="col-span-2 flex min-w-0 items-center gap-3 sm:col-span-1">
+                          <span className="h-3 w-3 shrink-0 rounded-full" style={{ backgroundColor: envelope.color }} />
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-medium">{envelope.name}</p>
+                            <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                              {envelope.type.toUpperCase()}
+                              {envelope.goal_type === 'refill_up_to' && (envelope.goal_target_cents ?? 0) > 0
+                                ? ` • Refill up to ${formatCurrencyFromCents(envelope.goal_target_cents ?? 0)}`
+                                : envelope.budget_target_cents > 0
+                                  ? ` • Assign monthly ${formatCurrencyFromCents(envelope.budget_target_cents)}`
+                                  : ''}
+                              {envelope.due_day_of_month != null
+                                ? ` • ${formatDueDayPhrase(envelope.due_day_of_month)}`
                                 : ''}
-                            {envelope.due_day_of_month != null
-                              ? ` • ${formatDueDayPhrase(envelope.due_day_of_month)}`
-                              : ''}
-                            {envelope.due_day_of_month != null
-                              ? (() => {
-                                  const next = nextDueDateOnOrAfter(envelope.due_day_of_month, new Date())
-                                  const mk = monthKeyFromDate(next)
-                                  return isBillPaidForMonth(envelope.bill_paid_by_month, mk)
-                                    ? ' • Next bill: paid'
-                                    : ' • Next bill: not marked paid'
-                                })()
-                              : ''}
-                          </p>
-                          {envelope.goal_type === 'refill_up_to' && (envelope.goal_target_cents ?? 0) > 0 ? (
-                            <EnvelopeRefillProgress
-                              balanceCents={envelope.balance_cents}
-                              capCents={envelope.goal_target_cents ?? 0}
-                            />
-                          ) : (
-                            envelope.budget_target_cents > 0 && (
-                              <EnvelopeMonthlyTargetProgress
-                                budgetTargetCents={envelope.budget_target_cents}
-                                assignedThisMonthCents={monthlyAssignedByEnvelope[envelope.id] ?? 0}
-                                assignedMonthLabel={format(activeEnvelopesViewMonth, 'MMMM yyyy')}
+                              {envelope.due_day_of_month != null
+                                ? (() => {
+                                    const next = nextDueDateOnOrAfter(envelope.due_day_of_month, new Date())
+                                    const mk = monthKeyFromDate(next)
+                                    return isBillPaidForMonth(envelope.bill_paid_by_month, mk)
+                                      ? ' • Next bill: paid'
+                                      : ' • Next bill: not marked paid'
+                                  })()
+                                : ''}
+                            </p>
+                            {envelope.goal_type === 'refill_up_to' && (envelope.goal_target_cents ?? 0) > 0 ? (
+                              <EnvelopeRefillProgress
+                                balanceCents={envelope.balance_cents}
+                                capCents={envelope.goal_target_cents ?? 0}
                               />
-                            )
-                          )}
+                            ) : (
+                              envelope.budget_target_cents > 0 && (
+                                <EnvelopeMonthlyTargetProgress
+                                  budgetTargetCents={envelope.budget_target_cents}
+                                  assignedThisMonthCents={monthlyAssignedByEnvelope[envelope.id] ?? 0}
+                                  assignedMonthLabel={format(activeEnvelopesViewMonth, 'MMMM yyyy')}
+                                />
+                              )
+                            )}
+                          </div>
                         </div>
-                      </div>
-                      <div className="text-right">
-                        <p className="text-[10px] font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 sm:hidden">
-                          Spent ({format(activeEnvelopesViewMonth, 'MMM')})
-                        </p>
-                        <p className="text-sm font-semibold tabular-nums">
-                          {formatCurrencyFromCents(spentByEnvelopeViewMonth[envelope.id] ?? 0)}
-                        </p>
-                      </div>
-                      <div className="text-right">
-                        <p className="text-[10px] font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 sm:hidden">
-                          Availability
-                        </p>
-                        <div className="text-sm font-semibold tabular-nums">
-                          {formatCurrencyFromCents(
-                            envelope.balance_cents - (futureAssignedAfterViewByEnvelope[envelope.id] ?? 0),
-                          )}
-                        </div>
-                        {(futureAssignedAfterViewByEnvelope[envelope.id] ?? 0) > 0 && (
-                          <p className="mt-0.5 text-[10px] leading-tight text-zinc-500 dark:text-zinc-400">
-                            Excludes {formatCurrencyFromCents(futureAssignedAfterViewByEnvelope[envelope.id] ?? 0)}{' '}
-                            reserved for future months
+                        <div className="text-right">
+                          <p className="text-[10px] font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 sm:hidden">
+                            Spent ({format(activeEnvelopesViewMonth, 'MMM')})
                           </p>
-                        )}
+                          <p className="text-sm font-semibold tabular-nums">
+                            {formatCurrencyFromCents(spentByEnvelopeViewMonth[envelope.id] ?? 0)}
+                          </p>
+                        </div>
+                        <div className="text-right">
+                          <p className="text-[10px] font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 sm:hidden">
+                            Availability
+                          </p>
+                          <div
+                            className={[
+                              'text-sm font-semibold tabular-nums',
+                              isNegativeAvailability ? 'text-red-700 dark:text-red-300' : '',
+                            ].join(' ')}
+                          >
+                            {formatCurrencyFromCents(availabilityCents)}
+                          </div>
+                          {(futureAssignedAfterViewByEnvelope[envelope.id] ?? 0) > 0 && (
+                            <p className="mt-0.5 text-[10px] leading-tight text-zinc-500 dark:text-zinc-400">
+                              Excludes {formatCurrencyFromCents(futureAssignedAfterViewByEnvelope[envelope.id] ?? 0)}{' '}
+                              reserved for future months
+                            </p>
+                          )}
+                          {isNegativeAvailability && (
+                            <button
+                              type="button"
+                              onClick={() => beginMoveToCoverNegativeAvailability(envelope)}
+                              className="mt-1 inline-flex min-h-7 items-center rounded-lg border border-red-300 px-2 text-[11px] font-medium text-red-700 transition hover:bg-red-50 dark:border-red-800 dark:text-red-300 dark:hover:bg-red-950/40"
+                            >
+                              Move money here
+                            </button>
+                          )}
+                        </div>
+                        <div className="col-span-2 flex justify-end gap-2 sm:col-span-1 sm:justify-start">
+                          <button type="button" onClick={() => beginEdit(envelope)} className="btn-secondary px-3 text-xs">
+                            Edit
+                          </button>
+                          <button type="button" onClick={() => void archiveEnvelope(envelope.id)} className="btn-danger px-3 text-xs">
+                            Archive
+                          </button>
+                        </div>
                       </div>
-                      <div className="col-span-2 flex justify-end gap-2 sm:col-span-1 sm:justify-start">
-                        <button type="button" onClick={() => beginEdit(envelope)} className="btn-secondary px-3 text-xs">
-                          Edit
-                        </button>
-                        <button type="button" onClick={() => void archiveEnvelope(envelope.id)} className="btn-danger px-3 text-xs">
-                          Archive
-                        </button>
-                      </div>
-                    </div>
-                  ))}
+                    )
+                  })}
                 </div>
               </div>
             ))}

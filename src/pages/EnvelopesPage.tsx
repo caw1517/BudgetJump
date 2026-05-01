@@ -1727,10 +1727,16 @@ export function EnvelopesPage() {
                                 : ''}
                             </p>
                             {envelope.goal_type === 'refill_up_to' && (envelope.goal_target_cents ?? 0) > 0 ? (
-                              <EnvelopeRefillProgress
-                                balanceCents={envelope.balance_cents}
-                                capCents={envelope.goal_target_cents ?? 0}
-                              />
+                              <>
+                                <EnvelopeAssignedThisMonth
+                                  assignedThisMonthCents={monthlyAssignedByEnvelope[envelope.id] ?? 0}
+                                  assignedMonthLabel={format(activeEnvelopesViewMonth, 'MMMM yyyy')}
+                                />
+                                <EnvelopeRefillProgress
+                                  balanceCents={envelope.balance_cents}
+                                  capCents={envelope.goal_target_cents ?? 0}
+                                />
+                              </>
                             ) : (
                               envelope.budget_target_cents > 0 && (
                                 <EnvelopeMonthlyTargetProgress
@@ -2094,6 +2100,22 @@ function EnvelopeMonthlyTargetProgress({
       <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700">
         <div className={`h-full rounded-full ${barClass}`} style={{ width: `${percent}%` }} />
       </div>
+    </div>
+  )
+}
+
+function EnvelopeAssignedThisMonth({
+  assignedThisMonthCents,
+  assignedMonthLabel,
+}: {
+  assignedThisMonthCents: number
+  assignedMonthLabel: string
+}) {
+  return (
+    <div className="mt-1.5">
+      <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+        Assigned in {assignedMonthLabel}: {formatCurrencyFromCents(assignedThisMonthCents)}
+      </p>
     </div>
   )
 }

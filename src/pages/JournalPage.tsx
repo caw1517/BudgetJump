@@ -265,6 +265,7 @@ export function JournalPage() {
   const currentMonthForNewRows = format(new Date(), 'yyyy-MM')
   const defaultAllocationMonth = date.slice(0, 7)
   const [assignedByEnvelopeMonth, setAssignedByEnvelopeMonth] = useState<Record<string, number>>({})
+  const [spentByEnvelopeMonth, setSpentByEnvelopeMonth] = useState<Record<string, number>>({})
   const [editingOriginalAssigned, setEditingOriginalAssigned] = useState<Record<string, number>>({})
   const editingPaycheckIdRef = useRef<string | null>(null)
 
@@ -283,7 +284,7 @@ export function JournalPage() {
     setError(null)
     try {
       const supabase = getSupabase()
-      const [groupsResp, envelopesResp, historyResp, assignmentsResp, accountsResp, sourcesResp] = await Promise.all([
+      const [groupsResp, envelopesResp, historyResp, assignmentsResp, accountsResp, sourcesResp, transactionsResp] = await Promise.all([
         supabase
           .from('envelope_groups')
           .select('id,name,sort_order,archived')
@@ -313,6 +314,11 @@ export function JournalPage() {
           .select('id,name,expected_amount_cents,sort_order,archived')
           .order('sort_order', { ascending: true })
           .order('name', { ascending: true }),
+        supabase
+          .from('transactions')
+          .select('envelope_id,amount_cents,date')
+          .eq('archived', false)
+          .limit(20_000),
       ])
       if (groupsResp.error) throw groupsResp.error
       if (envelopesResp.error) throw envelopesResp.error
@@ -320,6 +326,7 @@ export function JournalPage() {
       if (assignmentsResp.error) throw assignmentsResp.error
       if (accountsResp.error) throw accountsResp.error
       if (sourcesResp.error) throw sourcesResp.error
+      if (transactionsResp.error) throw transactionsResp.error
       const loadedEnvelopes = (envelopesResp.data ?? []) as Envelope[]
       const loadedGroups = (groupsResp.data ?? []) as EnvelopeGroup[]
       const depositCandidates = ((accountsResp.data ?? []) as DepositAccount[]).filter(
@@ -344,6 +351,17 @@ export function JournalPage() {
         assignedMap[key] = (assignedMap[key] ?? 0) + row.amount_cents
       }
       setAssignedByEnvelopeMonth(assignedMap)
+      const spentMap: Record<string, number> = {}
+      for (const row of (transactionsResp.data ?? []) as Array<{
+        envelope_id: string | null
+        date: string
+        amount_cents: number
+      }>) {
+        if (!row.envelope_id || row.amount_cents <= 0) continue
+        const key = `${row.envelope_id}|${row.date.slice(0, 7)}`
+        spentMap[key] = (spentMap[key] ?? 0) + row.amount_cents
+      }
+      setSpentByEnvelopeMonth(spentMap)
       if (!editingPaycheckIdRef.current) {
         setAllocations([])
       }
@@ -696,6 +714,52 @@ export function JournalPage() {
     editingPaycheckIdRef.current = paycheckId
   }
 
+  async function deletePaycheck(paycheckId: string) {
+    const entry = history.find((item) => item.id === paycheckId)
+    const label = entry ? `${entry.source} on ${format(parseCalendarDateLocal(entry.date), 'MMM d, yyyy')}` : 'this paycheck'
+    if (
+      !window.confirm(
+        `Delete ${label}? This will reverse the account deposit and remove the envelope allocations from this journal entry.`,
+      )
+    ) {
+      return
+    }
+
+    setSaving(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const { error: deleteError } = await getSupabase().rpc('delete_paycheck_journal_entry', {
+        p_paycheck_id: paycheckId,
+      })
+      if (deleteError) throw deleteError
+
+      if (editingPaycheckId === paycheckId) {
+        editingPaycheckIdRef.current = null
+        setEditingPaycheckId(null)
+        setEditingOriginalAssigned({})
+        setAllocations([])
+        setSourceMode('other')
+        setSelectedSourceId('')
+        setSource('')
+        setNetDollars('')
+        setNotes('')
+      }
+      if (selectedPaycheckId === paycheckId) {
+        setSelectedPaycheckId(null)
+        setSelectedDetail(null)
+        setSelectedAllocations([])
+      }
+
+      setNotice('Paycheck journal entry deleted.')
+      await loadData()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not delete paycheck entry.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
   async function loadRangeReport() {
     setReportLoading(true)
     setError(null)
@@ -919,15 +983,27 @@ export function JournalPage() {
     if (isRefill) {
       const cap = envelope.goal_target_cents ?? 0
       const projectedBalance = envelope.balance_cents - baseline + draftSum
+      const effectiveAssignedForMonth = Math.max(0, persisted - baseline + draftSum)
+      const spentThisMonth = spentByEnvelopeMonth[monthKey] ?? 0
+      const monthStartBalance = envelope.balance_cents - persisted + spentThisMonth
+      const rolloverRemaining = Math.max(monthStartBalance - spentThisMonth, 0)
+      const maxAssignableForMonth = Math.max(cap - rolloverRemaining, 0)
       const remainingHeadroom = Math.max(cap - projectedBalance, 0)
       const progress = cap > 0 ? Math.max(0, Math.min(100, Math.round((projectedBalance / cap) * 100))) : 0
-      const overCap = projectedBalance > cap
+      const overBalanceCap = projectedBalance > cap
+      const overMonthlyCap = effectiveAssignedForMonth > maxAssignableForMonth
       const status: 'under' | 'met' | 'over' =
-        projectedBalance > cap ? 'over' : projectedBalance === cap ? 'met' : 'under'
+        overBalanceCap || overMonthlyCap
+          ? 'over'
+          : effectiveAssignedForMonth === maxAssignableForMonth || projectedBalance === cap
+            ? 'met'
+            : 'under'
       return {
-        text: overCap
-          ? `Refill cap: projected balance ${formatCurrencyFromCents(projectedBalance)} is above ${formatCurrencyFromCents(cap)}.`
-          : `Refill cap: projected balance ${formatCurrencyFromCents(projectedBalance)} / ${formatCurrencyFromCents(cap)} (${formatCurrencyFromCents(remainingHeadroom)} headroom).`,
+        text: overMonthlyCap
+          ? `Refill cap exceeded: assigned ${formatCurrencyFromCents(effectiveAssignedForMonth)} / ${formatCurrencyFromCents(maxAssignableForMonth)} available this month.`
+          : overBalanceCap
+            ? `Refill cap: projected balance ${formatCurrencyFromCents(projectedBalance)} is above ${formatCurrencyFromCents(cap)}.`
+            : `Refill cap: assigned ${formatCurrencyFromCents(effectiveAssignedForMonth)} / ${formatCurrencyFromCents(maxAssignableForMonth)} available this month. Projected balance ${formatCurrencyFromCents(projectedBalance)} / ${formatCurrencyFromCents(cap)} (${formatCurrencyFromCents(remainingHeadroom)} headroom).`,
         progress,
         status,
       }
@@ -1423,16 +1499,30 @@ export function JournalPage() {
                         : ' • No deposit account (legacy)'}
                     </p>
                   </div>
-                  <button
-                    type="button"
-                    onClick={(event) => {
-                      event.stopPropagation()
-                      void startEditingPaycheck(entry.id)
-                    }}
-                    className="min-h-9 rounded-lg border border-zinc-300 px-3 text-xs font-medium dark:border-zinc-700"
-                  >
-                    Edit
-                  </button>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        void startEditingPaycheck(entry.id)
+                      }}
+                      disabled={saving}
+                      className="min-h-9 rounded-lg border border-zinc-300 px-3 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700"
+                    >
+                      Edit
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        void deletePaycheck(entry.id)
+                      }}
+                      disabled={saving}
+                      className="btn-danger px-3 text-xs disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Delete
+                    </button>
+                  </div>
                 </div>
               </button>
             ))}
